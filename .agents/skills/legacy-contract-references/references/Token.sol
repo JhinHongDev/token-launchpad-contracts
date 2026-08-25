@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.13;
+
 
 import "./OpenZeppelinDependencies.sol";
 import "./Interfaces.sol";
@@ -37,14 +38,14 @@ contract StagedCustomToken is ERC20, Ownable {
     mapping(address => bool) public _autoPair;
     mapping(address => bool) private excludeFeeList;
     address public feeRecipient;
-
+        
     IPancakeRouter02 router = IPancakeRouter02(0xD99D1c33F9fC3444f8101754aBC46c52416550D1);
     address public pairTRX;
 
     uint256 public lastLpBurnTime;
     uint256 public percentDiv = 10000;
 
-    address public presaleContract; // 预售合约地址
+    address public presaleContract;  // 预售合约地址
 
     constructor(
         string memory _name,
@@ -65,6 +66,7 @@ contract StagedCustomToken is ERC20, Ownable {
         excludeFeeList[_factoryAddress] = true;
         excludeFeeList[feeRecipient] = true;
 
+
         IPancakeFactory factory = IPancakeFactory(router.factory());
         pairTRX = factory.createPair(address(this), router.WETH());
         _autoPair[pairTRX] = true;
@@ -72,43 +74,44 @@ contract StagedCustomToken is ERC20, Ownable {
         _mint(_factoryAddress, _totalSupply);
     }
 
-    function _transfer(address from, address to, uint256 amount) internal virtual override {
-        if (_autoPair[from] || _autoPair[to]) {
+    function _transfer(address from, address to, uint256 amount) internal virtual override {        
+
+        if(_autoPair[from] || _autoPair[to]) {
             address _user;
             uint256 _fee;
 
             //buy
-            if (_autoPair[from]) {
+            if(_autoPair[from]) {
                 _user = to;
                 _fee = baseConfig.feeBuy;
             }
             //sell
-            else if (_autoPair[to]) {
+            else if(_autoPair[to]) {
                 _user = from;
                 _fee = baseConfig.feeSell;
             }
 
             if (!isExcludeFee(_user)) {
-                require(tradingEnabled, "not Launch");
+                require(tradingEnabled, "not Launch");      
             }
 
-            if (baseConfig.protectTime != 0) {
-                if (tradingEnabled && block.timestamp <= tradingTime + baseConfig.protectTime) {
+            if(baseConfig.protectTime != 0){
+                if(tradingEnabled && block.timestamp <= tradingTime + baseConfig.protectTime){
                     _fee = baseConfig.protectFee;
                 }
             }
 
             if (!isExcludeFee(from) && !isExcludeFee(to)) {
                 uint256 fee = (amount * _fee) / percentDiv;
-                if (baseConfig.isInsideSell) {
+                if(baseConfig.isInsideSell){
                     super._transfer(from, address(this), fee);
-                } else {
+                }else{
                     super._transfer(from, feeRecipient, fee);
                 }
 
-                if (_autoPair[to]) {
+                if(_autoPair[to]){
                     autoBurnUniswapPair();
-                    if (baseConfig.isInsideSell) {
+                    if(baseConfig.isInsideSell){
                         swapIng = true;
                         swapTokenForFee();
                         swapIng = false;
@@ -121,20 +124,18 @@ contract StagedCustomToken is ERC20, Ownable {
     }
 
     function autoBurnUniswapPair() internal {
-        if (baseConfig.lpBurnEnabled) {
-            if (
-                block.timestamp - lastLpBurnTime > baseConfig.lpBurnFrequency
-                    && balanceOf(pairTRX) > baseConfig.burnLimit
-            ) {
+        if(baseConfig.lpBurnEnabled) {
+            if (block.timestamp - lastLpBurnTime > baseConfig.lpBurnFrequency && balanceOf(pairTRX) > baseConfig.burnLimit) {
                 burnPair(pairTRX);
                 lastLpBurnTime = block.timestamp;
             }
-        }
+        }     
     }
 
     function burnPair(address _pair) internal {
         uint256 liquidityPairBalance = balanceOf(_pair);
-        uint256 amountToBurn = (liquidityPairBalance * baseConfig.percentForLPBurn) / percentDiv;
+        uint256 amountToBurn = (liquidityPairBalance * baseConfig.percentForLPBurn) /
+            percentDiv;
 
         if (amountToBurn > 0) {
             super._transfer(_pair, address(0xdead), amountToBurn);
@@ -170,7 +171,13 @@ contract StagedCustomToken is ERC20, Ownable {
         path[0] = address(this);
         path[1] = router.WETH();
 
-        router.swapExactTokensForETHSupportingFeeOnTransferTokens(tokenAmount, 0, path, feeRecipient, block.timestamp);
+        router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0,
+            path,
+            feeRecipient,
+            block.timestamp
+        );  
     }
 
     /**

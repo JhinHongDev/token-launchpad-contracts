@@ -9,7 +9,14 @@
 - **不猜测、不私自修改**：需求不明确时先提问确认，禁止凭猜测改动业务逻辑；任何超出用户指令范围的修改必须先征得同意。
 - **安全第一**：涉及资金流向、权限控制、升级逻辑的改动，必须主动做安全审查并说明风险。
 
-## 2. `src/lib` 目录保护规则
+## 2. 核心业务定位与模型架构
+
+* **代币模板**：使用 `FlapTaxTokenV3` 作为唯一代币模板（固定 10 亿总量、买卖非对称税率、Anti-Farmer 防夹、动态清算阈值）。
+* **唯一目标网络**：**仅支持 BSC（Binance Smart Chain）**，不编写任何多链兼容的冗余代码。
+
+> 其余业务细节（如发币/预售托管比例、代币分配、领取机制、税收通道等）随产品演进而变动，由实际代码为准，本文件不做说明。
+
+## 3. `src/lib` 目录保护规则
 
 `src/lib/`（含 `interfaces/`、`token/` 等子目录）为受保护的第三方/基础依赖代码：
 
@@ -19,49 +26,16 @@
   2. 说明修改原因、影响范围和替代方案；
   3. 说明为什么不能在 `src/lib` 之外解决（如继承重写、包装合约）。
 
-## 3. Foundry 使用规范
+## 4. 代码质量与工程规范
 
-### 常用命令
-
-```bash
-forge build              # 编译
-forge test               # 运行全部测试
-forge test --match-test test_Xxx        # 按名称过滤测试
-forge test --match-contract XxxTest     # 按合约过滤
-forge test -vvvv         # 显示完整调用栈（调试失败用例必用）
-forge coverage           # 覆盖率报告
-forge snapshot           # gas 快照（.gas-snapshot）
-forge fmt                # 格式化（提交前必须执行）
-```
-
-### 格式化排除项
-
-`foundry.toml` 中已配置 `[fmt] ignore = ["lib/**/*.sol", "src/lib/**/*.sol"]`，
-格式化永远不应触碰这两个目录；如需新增排除路径，改 `ignore` 数组即可。
-
-### 测试规范
-
-- 测试文件放 `test/`，命名 `Xxx.t.sol`，合约名 `XxxTest`。
-- 不变量测试用 handler + ghost variable 模式，输入一律用 `bound()` 而非 `vm.assume()`。
-- 断言优先使用 forge-std 的 `assertEq/assertGe` 等（带差异输出），而非裸 `require`。
-- 修复 bug 前先写一个能复现问题的失败测试。
-
-### 依赖管理
-
-- 第三方库通过 `lib/`（git submodule / `forge install`）引入，remappings 在 `remappings.txt` 或 `foundry.toml` 配置。
-- 禁止将依赖库源码复制进 `src/`。
-
-## 4. 技能分配规则
-
-按任务类型选用 `.agents/skills/` 及全局已安装的技能：
-
-| 任务场景 | 使用技能 |
-|---|---|
-| 集成 OpenZeppelin 组件（ERC20/721/1155、AccessControl、Pausable、ReentrancyGuard 等） | `develop-secure-contracts` |
-| 新建 Foundry/Hardhat 项目、配置 OZ 依赖与 remappings | `setup-solidity-contracts` |
-| 合约升级（UUPS/Transparent/Beacon）、initializer、存储布局校验 | `upgrade-solidity-contracts` |
-| 查询第三方库的最新 API/文档（不确定 API 时必须查，禁止凭记忆） | `context7-docs` |
-| Solana / Anchor 相关开发（本项目以 EVM 为主，通常不用） | `solana-dev` |
+1. **错误处理**：全面采用现代 Solidity **Custom Errors**（如 `error ZeroAddress()`），杜绝大段字符串 `require(..., "STRING_REASON")` 以节省 Gas。
+2. **安全防护**：
+   * 严格遵循 **CEI (Checks-Effects-Interactions)** 模式防范重入。
+   * 严格执行边界检查（如买卖税率上限、防溢出、零地址、流动性滑点防夹）。
+3. **架构解耦**：
+   * 保持高内聚低耦合，严禁跨合约的冗余状态同步与混乱的 try-catch 链。
+4. **文档与规范**：所有公共接口、结构体、事件与错误均配备规范的 **NatSpec 注释**（`@notice`, `@dev`, `@param`, `@return`）。
+5. **测试驱动**：每个新合约必须配备对应的 Foundry 单元测试（`test/*.t.sol`），确保 `forge test` 100% 通过。
 
 规则：
 

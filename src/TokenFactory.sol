@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.13;
+
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {IPancakeRouter02, IPancakeFactory} from "src/lib/interfaces/IPancakeRouter02.sol";
+import {Clones} from "src/Clones.sol";
+
+// ---------------------------------------------------------------------------
+// 自定义错误
+// ---------------------------------------------------------------------------
+
+error BuyFeeTooHigh();
+error SellFeeTooHigh();
+error InvalidFeeRecipient();
+error InvalidTaxDuration();
+error InvalidAntiFarmerDuration();
+
+// ============================================================================
+// TokenFactory - 克隆 FlapTaxTokenV3 模板 + 创建 Pair
+// ============================================================================
+
+struct TokenConfig {
+    string name;
+    string symbol;
+    uint256 feeBuy; // 买税 bps（上限 MAX_TAX_BPS = 10%）
+    uint256 feeSell; // 卖税 bps（上限 MAX_TAX_BPS = 10%）
+    address feeRecipient; // 兜底接收（TaxProcessor feeReceiver：swap 失败兜底 / 无分红实例时的分红兜底）
+    address marketReceiver; // 创作者资金钱包（marketing 通道接收方）
+    uint256 taxDuration; // 税持续时间（秒）
+    uint256 antiFarmerDuration; // 防farm税持续时间（秒，<= taxDuration）
+    uint256 liqExpectedOutputAmount; // 清算参考输出（BNB wei，0 = 关闭方向调节）
+    // ── 税收四通道分配（bps，合计必须 = 10000，平台不抽成）──
+    uint16 creatorWalletBps; // 创作者资金钱包通道
+    uint16 burnBps; // 销毁通道（减少供应量）
+    uint16 dividendBps; // 分红通道（持有者奖励）
+    uint16 liquidityBps; // 流动性通道（增加流动性）
+    uint256 minHolderBalance; // 分红资格最低持仓（代币 wei，0 = 不设门槛）
+}
+
+contract TokenFactory is AccessControl {
+    bytes32 public constant COORDINATOR_ROLE = keccak256("COORDINATOR_ROLE");
+
+    /// @notice 买卖税率上限：1000 bps = 10%（产品规则）
+    uint256 public constant MAX_TAX_BPS = 1000;
+
+    // FlapTaxTokenV3 实现合约（含 MIN/START_LIQ_THRESHOLD immutables）
+    address public immutable flapImplementation;
+    address public immutable routerAddress;
+
+    struct TokenBundle {
+        address token;
+        address pair;
+    }
+
+    event TokenCreated(address indexed token, address indexed creator, address pair, address taxProcessor);
+
+    constructor(address _flapImplementation, address _router, address _coordinator) {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(COORDINATOR_ROLE, _coordinator);
+        flapImplementation = _flapImplementation;
+        routerAddress = _router;
+    }
+
+    /// @dev 部署克隆 → 创建 V2 交易对。TaxProcessor 由 Coordinator 部署并初始化（其部署者为调用链协调器）。
+    function createToken(TokenConfig memory config) external onlyRole(COORDINATOR_ROLE) returns (TokenBundle memory) {
+        if (config.feeBuy > MAX_TAX_BPS) revert BuyFeeTooHigh();
+        if (config.feeSell > MAX_TAX_BPS) revert SellFeeTooHigh();
+        if (config.feeRecipient == address(0)) revert InvalidFeeRecipient();
+        if (config.taxDuration == 0) revert InvalidTaxDuration();
+        if (config.antiFarmerDuration == 0 || config.antiFarmerDuration > config.taxDuration) {
+            revert InvalidAntiFarmerDuration();
+        }
+
+        address token = Clones.clone(flapImplementation);
+
+        IPancakeRouter02 router = IPancakeRouter02(routerAddress);
+        address pair = IPancakeFactory(router.factory()).createPair(token, router.WETH());
+
+        emit TokenCreated(token, tx.origin, pair, address(0));
+        return TokenBundle({token: token, pair: pair});
+    }
+}

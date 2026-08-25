@@ -10,7 +10,7 @@ import {OwnableUpgradeable} from "@openzeppelin-contracts-upgradeable/access/Own
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {IDividend} from "src/lib/interfaces/IDividend.sol";
+import {IDividend} from "src/lib/dividend/IDividend.sol";
 import {ITaxProcessor} from "src/lib/interfaces/ITaxProcessor.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
 

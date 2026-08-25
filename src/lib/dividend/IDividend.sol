@@ -31,6 +31,11 @@ interface IDividend {
     /// @param addr The address that was excluded
     event FlapDividendAddressExcluded(address indexed taxToken, address addr);
 
+    /// @notice Emitted when an address is removed from the exclusion list
+    /// @param taxToken The tax token contract address
+    /// @param addr The address that was unexcluded
+    event FlapDividendAddressUnexcluded(address indexed taxToken, address addr);
+
     /// @notice Emitted when a dividend withdrawal fails
     /// @param taxToken The tax token contract address
     /// @param user The user for whom the withdrawal failed
@@ -48,6 +53,89 @@ interface IDividend {
     /// @param user The user whose reward debt changed
     /// @param rewardDebt The new reward debt
     event FlapDividendRewardDebtChanged(address indexed taxToken, address indexed user, uint256 rewardDebt);
+
+    /// @notice Emitted when a first-time receiver's share write is skipped because the
+    ///         transaction's `tx.origin` is in `deferredOrigins`.
+    /// @dev The transfer SUCCEEDS; only the dividend registration is outstanding. The
+    ///      keeper must call `refreshShares` to settle it. Until then the holder's share is 0
+    ///      and they accrue nothing — but their slice is held back from other holders via
+    ///      until the keeper settles them.
+    /// @param taxToken The tax token contract address
+    /// @param user The holder whose registration was deferred
+    /// @param share The share that would have been written
+    /// @param origin The `tx.origin` that triggered the deferral
+    event FlapDividendShareDeferred(
+        address indexed taxToken, address indexed user, uint256 share, address indexed origin
+    );
+
+    /// @notice Emitted when an origin is added to or removed from the deferral set.
+    event FlapDividendDeferredOriginSet(address indexed taxToken, address indexed origin, bool deferred);
+
+    /// @notice Emitted when an address is added to or removed from the `refreshShares`
+    ///         keeper set.
+    event FlapDividendKeeperSet(address indexed taxToken, address indexed keeper, bool allowed);
+
+    /// @notice Emitted when a holder's dividend payout destination is changed by the owner.
+    /// @dev `previousReceiver` is included so a monitor can alert on redirects without
+    ///      keeping its own state. address(0) in either field means "no redirect".
+    event FlapDividendReceiverSet(
+        address indexed taxToken, address indexed holder, address indexed receiver, address previousReceiver
+    );
+
+    /// @notice Emitted when the dividend token is updated
+    /// @param taxToken The tax token contract address
+    /// @param oldToken The previous dividend token address
+    /// @param newToken The new dividend token address
+    event FlapDividendTokenUpdated(address indexed taxToken, address indexed oldToken, address indexed newToken);
+
+    // --- Immutable / Storage Accessors ---
+
+    /// @notice WETH address (if dividendToken == weth, native ETH is sent on withdraw)
+    function weth() external view returns (address);
+
+    /// @notice FlapBlackHole address (always excluded from dividends)
+    function flapBlackHole() external view returns (address);
+
+    /// @notice The ERC-20 token distributed as dividends
+    function dividendToken() external view returns (address);
+
+    /// @notice The FlapTaxToken that is allowed to call setShare
+    function taxToken() external view returns (address);
+
+    /// @notice Current magnified dividend per share accumulator
+    /// @dev Non-zero means dividends have been deposited under the current token;
+    ///      must be 0 before changing dividendToken to avoid accounting corruption.
+    function getMagnifiedDividendPerShare() external view returns (uint256);
+
+    /// @notice Per-user info snapshot (share, rewardDebt, pendingBalance)
+    /// @param user The user address
+    /// @return share        Current share / stake
+    /// @return rewardDebt   Accumulator offset already credited to the user
+    /// @return pendingBalance Settled rewards not yet claimed
+    function userInfo(address user) external view returns (uint256 share, uint256 rewardDebt, uint256 pendingBalance);
+
+    /// @notice Total dividends that have been deposited and distributed
+    function totalDividendsDistributed() external view returns (uint256);
+
+    /// @notice Whether an address is excluded from receiving dividends
+    /// @param addr The address to query
+    function excludedFromDividends(address addr) external view returns (bool);
+
+    /// @notice Remove an address from the exclusion list
+    /// @param addr The address to unexclude
+    function unexcludeAddress(address addr) external;
+
+    /// @notice Update the minimum share balance threshold
+    /// @param newMin The new minimum share balance
+    function setMinimumShareBalance(uint256 newMin) external;
+
+    /// @notice Currently claimable amount for a user (does not include already withdrawn)
+    /// @param user The user address
+    function withdrawableDividendOf(address user) external view returns (uint256);
+
+    /// @notice Lifetime earnings for a user (claimable + already withdrawn)
+    /// @param user The user address
+    function accumulativeDividendOf(address user) external view returns (uint256);
 
     /// @notice Initialize the dividend contract
     /// @param dividendToken_ The token used for dividend payments
@@ -112,4 +200,11 @@ interface IDividend {
     /// @param amount The amount to withdraw (0 means withdraw all)
     /// @param to The address to send the tokens to
     function emergencyWithdraw(address token, uint256 amount, address to) external;
+
+    /// @notice Update the dividend token address
+    /// @dev Only callable by the owner (Portal). Any undistributed dividends accrued
+    ///      under the previous token should be distributed (or recovered via emergencyWithdraw)
+    ///      before calling this function, as the accounting will switch to the new token immediately.
+    /// @param newToken The new token to distribute as dividends (must be non-zero)
+    function setDividendToken(address newToken) external;
 }

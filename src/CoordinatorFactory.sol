@@ -1,311 +1,73 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.13;
 
-import "./OpenZeppelinDependencies.sol";
-import "./Token.sol";
-import "./presaleAA.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {IPancakeRouter02} from "src/lib/interfaces/IPancakeRouter02.sol";
+import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
+import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
+import {PRESALE, ITokenMigration} from "src/Presale.sol";
+import {TaxProcessor} from "src/TaxProcessor.sol";
+import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
+import {ITaxProcessor, TaxProcessorInitParams} from "src/lib/interfaces/ITaxProcessor.sol";
+import {Clones} from "src/Clones.sol";
+import {TransferHelper} from "src/TransferHelper.sol";
 
-/**
- * @title 简化协调器模式实现
- * @dev 在单文件中实现3个独立合约，优化后的协调器架构
- *
- * 架构说明：
- * 1. TokenFactory - 专门创建Token合约 (~8KB)
- * 2. PresaleFactory - 专门创建Presale合约 (~19KB)
- * 3. CoordinatorFactory - 协调所有操作并处理配置关联 (~8KB)
- */
+// ---------------------------------------------------------------------------
+// 自定义错误
+// ---------------------------------------------------------------------------
 
-// ============================================================================
-// 1️⃣ TokenFactory - 专门负责Token创建 (~8KB)
-// ============================================================================
-contract TokenFactory is AccessControl {
-    bytes32 public constant COORDINATOR_ROLE = keccak256("COORDINATOR_ROLE");
+error FactoryDisabled();
+error InsufficientCreationFee();
+error EmptyTokenName();
+error EmptyTokenSymbol();
+error InvalidPrice();
+error TokenNotRegistered();
+error NotTokenCreator();
+error TokenCreationFailed();
+error NoSupply();
+error TokenTransferFailed();
+error NoFeesToWithdraw();
+error WithdrawFailed();
+error InvalidAllocationBps();
+error DividendNotDeployed();
+error RefundFailed();
+error InvalidMaxBuyPerWallet();
 
-    struct TokenConfig {
-        string name;
-        string symbol;
-        uint256 totalSupply;
-        uint256 feeBuy;
-        uint256 feeSell;
-        address feeRecipient;
-        bool lpBurnEnabled;
-        uint256 lpBurnFrequency;
-        uint256 percentForLPBurn;
-        uint256 burnLimit;
-        uint256 protectTime;
-        uint256 protectFee;
-        bool isInsideSell;
-        uint256 swapThreshold;
-    }
-
-    event TokenCreated(address indexed token, address indexed creator);
-
-    constructor() {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-    }
-
-    /**
-     * @dev 创建Token合约 - 只能由Coordinator调用
-     */
-    function createToken(TokenConfig memory config) external onlyRole(COORDINATOR_ROLE) returns (address) {
-        require(config.feeBuy <= 10000, "Buy fee too high");
-        require(config.feeSell <= 10000, "Sell fee too high");
-        require(config.feeRecipient != address(0), "Invalid fee recipient");
-
-        // 创建高级配置结构体
-        StagedCustomToken.BasicAdvancedConfig memory advancedConfig = StagedCustomToken.BasicAdvancedConfig({
-            feeBuy: config.feeBuy,
-            feeSell: config.feeSell,
-            lpBurnEnabled: config.lpBurnEnabled,
-            lpBurnFrequency: config.lpBurnFrequency,
-            percentForLPBurn: config.percentForLPBurn,
-            burnLimit: config.burnLimit,
-            protectTime: config.protectTime,
-            protectFee: config.protectFee,
-            isInsideSell: config.isInsideSell,
-            swapThreshold: config.swapThreshold
-        });
-
-        // 创建Token实例 - 这里包含了StagedCustomToken的字节码
-        StagedCustomToken token = new StagedCustomToken(
-            config.name,
-            config.symbol,
-            config.totalSupply,
-            msg.sender, // Coordinator作为临时owner
-            config.feeRecipient,
-            advancedConfig
-        );
-
-        emit TokenCreated(address(token), tx.origin);
-        return address(token);
-    }
-
-    /**
-     * @dev 创建带Salt的Token合约（CREATE2靓号部署） - 只能由Coordinator调用
-     */
-    function createTokenWithSalt(TokenConfig memory config, bytes32 salt)
-        external
-        onlyRole(COORDINATOR_ROLE)
-        returns (address)
-    {
-        require(config.feeBuy <= 10000, "Buy fee too high");
-        require(config.feeSell <= 10000, "Sell fee too high");
-        require(config.feeRecipient != address(0), "Invalid fee recipient");
-
-        // 创建高级配置结构体
-        StagedCustomToken.BasicAdvancedConfig memory advancedConfig = StagedCustomToken.BasicAdvancedConfig({
-            feeBuy: config.feeBuy,
-            feeSell: config.feeSell,
-            lpBurnEnabled: config.lpBurnEnabled,
-            lpBurnFrequency: config.lpBurnFrequency,
-            percentForLPBurn: config.percentForLPBurn,
-            burnLimit: config.burnLimit,
-            protectTime: config.protectTime,
-            protectFee: config.protectFee,
-            isInsideSell: config.isInsideSell,
-            swapThreshold: config.swapThreshold
-        });
-
-        // 使用 CREATE2 部署 Token 实例
-        StagedCustomToken token = new StagedCustomToken{salt: salt}(
-            config.name,
-            config.symbol,
-            config.totalSupply,
-            msg.sender, // Coordinator作为临时owner
-            config.feeRecipient,
-            advancedConfig
-        );
-
-        // 校验后 4 位 16 进制字符为 8888
-        require(uint16(uint160(address(token))) == 0x8888, "STEP3_INVALID_VANITY_ADDRESS");
-
-        emit TokenCreated(address(token), tx.origin);
-        return address(token);
-    }
+/// @notice 平台侧对每代币 Dividend 实例的管理子集（完整接口见 src/lib/dividend/IDividend.sol）
+interface IPlatformDividend {
+    function initialize(address dividendToken_, address taxToken_, uint256 minimumShareBalance_) external;
+    function excludeAddress(address addr) external;
+    function unexcludeAddress(address addr) external;
+    function setMinimumShareBalance(uint256 newMinimumShareBalance) external;
+    function emergencyWithdraw(address token, uint256 amount, address to) external;
 }
 
 // ============================================================================
-// 2️⃣ PresaleFactory - 轻量克隆版 (~3KB)
+// CoordinatorFactory - 一站式发币编排（代币 + Pair + TaxProcessor + 分红 + 托管仓）
 // ============================================================================
-contract PresaleFactory is AccessControl {
-    bytes32 public constant COORDINATOR_ROLE = keccak256("COORDINATOR_ROLE");
-
-    // 预先部署好的 PRESALE 模板实现合约地址
-    address public immutable presaleImplementation;
-
-    struct PresaleConfig {
-        uint256 presaleEthAmount;
-        uint256 tradeEthAmount;
-        uint256 maxTotalNum;
-        uint256 presaleMaxNum;
-        uint256 marketDisAmount;
-        // LP分配相关参数
-        uint256 userLPShare; // 用户LP分配比例 (基于10000)
-        uint256 devLPShare; // 开发团队LP分配比例 (基于10000)
-        address devLPReceiver; // 开发团队LP接收地址
-        bool lpDistributionEnabled; // 是否启用LP分配功能
-
-        // === LGE集成参数 ===
-        uint256 startTime; // 预售开始时间
-        uint256 hardcap; // 硬顶限制
-        uint256 maxBuyPerWallet; // 每个钱包最大购买量
-
-        // Vesting参数
-        uint256 vestingDelay; // 释放延迟（7-90天）
-        uint256 vestingRate; // 释放比例（5-20%）
-        bool vestingEnabled; // 是否启用vesting
-
-        // Backing参数
-        uint256 backingShare; // 资产支撑份额（0-50%）
-        address backingReceiver; // 资产支撑接收地址
-    }
-
-    event PresaleCreated(address indexed presale, address indexed creator);
-
-    /**
-     * @dev 构造函数：指定 PRESALE 模版合约地址
-     */
-    constructor(address _presaleImplementation) {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        presaleImplementation = _presaleImplementation;
-    }
-
-    /**
-     * @dev 内部函数：使用 EIP-1167 极简代理字节码直接在内联汇编中创建轻量代理合约
-     */
-    function _clone(address implementation) internal returns (address instance) {
-        bytes32 salt = keccak256(abi.encodePacked(block.timestamp, msg.sender, tx.origin));
-        assembly {
-            // EIP-1167 标准 Minimal Proxy 字节码结构
-            let ptr := mload(0x40)
-            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
-            mstore(add(ptr, 0x14), shl(0x60, implementation))
-            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
-            instance := create2(0, ptr, 0x37, salt)
-        }
-        require(instance != address(0), "ERC1167: create2 failed");
-    }
-
-    /**
-     * @dev 创建Presale合约 - 只能由Coordinator调用
-     */
-    function createPresale(PresaleConfig memory config) external onlyRole(COORDINATOR_ROLE) returns (address) {
-        require(config.presaleEthAmount > 0, "Invalid presale amount");
-
-        // 🎯 核心改动：不再使用 new PRESALE()，而是直接从模板克隆微型代理
-        address presaleAddress = _clone(presaleImplementation);
-        PRESALE presale = PRESALE(payable(presaleAddress));
-
-        // 初始化代理合约状态并把 owner 设置为当前 PresaleFactory
-        presale.initialize(
-            address(this), 0xD99D1c33F9fC3444f8101754aBC46c52416550D1, 0x337610d27c682E347C9cD60BD4b3b107C9d34dDd
-        );
-
-        // 设置预售参数
-        presale.setPoolData(
-            config.presaleEthAmount,
-            config.tradeEthAmount,
-            config.maxTotalNum,
-            config.presaleMaxNum,
-            config.marketDisAmount,
-            10 // 固定解锁率
-        );
-
-        // 设置LP分配参数（如果启用）
-        if (config.lpDistributionEnabled) {
-            presale.setLPDistribution(
-                config.userLPShare, config.devLPShare, config.devLPReceiver, config.lpDistributionEnabled
-            );
-        }
-
-        // === 设置LGE集成参数 ===
-        if (config.startTime > 0 || config.hardcap > 0 || config.maxBuyPerWallet > 0) {
-            presale.setLGEConfig(config.startTime, config.hardcap, config.maxBuyPerWallet);
-        }
-
-        // 设置Vesting配置（如果启用）
-        if (config.vestingEnabled) {
-            presale.setVestingConfig(config.vestingDelay, config.vestingRate, config.vestingEnabled);
-        }
-
-        // 设置Backing配置（如果有backing份额）
-        if (config.backingShare > 0) {
-            presale.setBackingConfig(config.backingShare, config.backingReceiver);
-        }
-
-        // 直接将预售合约所有权转移给 CoordinatorFactory (即 msg.sender)
-        presale.transferOwnership(msg.sender);
-
-        emit PresaleCreated(address(presale), tx.origin);
-        return address(presale);
-    }
-}
-
-// ============================================================================
-// 3️⃣ Coordinator - 协调所有操作的主入口 (简化版，移除ConfigManager)
-// ============================================================================
-contract CoordinatorFactory is Ownable, ReentrancyGuard {
-    // === 核心状态变量 ===
-    bool public factoryEnabled = true;
-    uint256 public creationFee = 1 * 10 ** 16; // 50 TRX
-    uint256 public totalPairsCreated = 0;
-
-    // === 工厂合约实例 ===
+contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     TokenFactory public tokenFactory;
     PresaleFactory public presaleFactory;
+    address public routerAddress;
 
-    // === 兼容性结构体定义 ===
-    struct TokenConfig {
-        string name;
-        string symbol;
-        uint256 totalSupply;
-        uint256 feeBuy;
-        uint256 feeSell;
-        address feeRecipient;
-        bool lpBurnEnabled;
-        uint256 lpBurnFrequency;
-        uint256 percentForLPBurn;
-        uint256 burnLimit;
-        uint256 protectTime;
-        uint256 protectFee;
-        bool isInsideSell;
-        uint256 swapThreshold;
-    }
+    /// @notice Dividend 实现合约（构造时注入；每代币按需克隆）
+    address public immutable dividendImplementation;
 
-    struct PresaleConfig {
-        uint256 presaleEthAmount;
-        uint256 tradeEthAmount;
-        uint256 maxTotalNum;
-        uint256 presaleMaxNum;
-        uint256 marketDisAmount;
-        // LP分配相关参数
-        uint256 userLPShare; // 用户LP分配比例 (基于10000)
-        uint256 devLPShare; // 开发团队LP分配比例 (基于10000)
-        address devLPReceiver; // 开发团队LP接收地址
-        bool lpDistributionEnabled; // 是否启用LP分配功能
+    bool public factoryEnabled = true;
+    uint256 public creationFee = 0.005 ether; // 0.005 BNB = 5e15 wei
+    uint256 public totalPairsCreated = 0;
 
-        // === LGE集成参数（基于LEG.txt） ===
-        uint256 startTime; // 预售开始时间
-        uint256 hardcap; // 硬顶限制
-        uint256 maxBuyPerWallet; // 每个钱包最大购买量
+    mapping(address => address) public tokenPresales;
+    mapping(address => address) public presaleTokens;
+    mapping(address => address) public tokenCreators;
+    /// @notice 代币 → Dividend 实例（仅当分红通道 bps > 0 时部署）
+    mapping(address => address) public tokenDividends;
+    mapping(address => address[]) public creatorTokens;
+    address[] public allTokens;
 
-        // Vesting参数
-        uint256 vestingDelay; // 释放延迟（7-90天）
-        uint256 vestingRate; // 释放比例（5-20%）
-        bool vestingEnabled; // 是否启用vesting
-
-        // Backing参数
-        uint256 backingShare; // 资产支撑份额（0-50%）
-        address backingReceiver; // 资产支撑接收地址
-    }
-
-    // === 核心映射 ===
-    mapping(address => address) public tokenPresales; // 代币 => 预售合约
-    mapping(address => address) public presaleTokens; // 预售 => 代币合约
-    mapping(address => address) public tokenCreators; // 代币 => 创建者地址
-
-    // === 查询支持数据结构 ===
     struct TokenPresalePair {
         address tokenAddress;
         address presaleAddress;
@@ -316,257 +78,130 @@ contract CoordinatorFactory is Ownable, ReentrancyGuard {
         uint256 totalSupply;
     }
 
-    // 创建者 => 代币地址数组
-    mapping(address => address[]) public creatorTokens;
-
-    // 所有创建的代币地址数组（用于全局查询）
-    address[] public allTokens;
-
-    // 代币地址 => 详细信息
     mapping(address => TokenPresalePair) public tokenPairDetails;
 
-    // === 核心事件 ===
     event TokenPresalePairCreated(
         address indexed token, address indexed presale, address indexed creator, uint256 totalSupply
     );
-
-    event CoordinatorInitialized(address tokenFactory, address presaleFactory);
-
     event OwnershipTransferred(address indexed token, address indexed presale, address indexed newOwner);
-    event TokenPresaleLinked(address indexed token, address indexed presale);
-
-    // === LEG 相关事件 ===
-    event LGEConfigSet(
-        address indexed presale,
-        address indexed token,
-        address indexed creator,
-        uint256 startTime,
-        uint256 hardcap,
-        uint256 maxBuyPerWallet
+    event PresaleSetup(
+        address indexed token, address indexed presale, uint256 creatorShare, uint256 poolShare, uint256 presaleShare
     );
+    event FactoryEnabledSet(bool enabled);
+    event CreationFeeSet(uint256 fee);
+    event FeesWithdrawn(uint256 amount, address indexed to);
+    event DividendCreated(address indexed token, address indexed dividend);
+    event ExcessRefunded(address indexed to, uint256 amount);
 
-    event VestingConfigSet(
-        address indexed presale,
-        address indexed token,
-        address indexed creator,
-        uint256 vestingDelay,
-        uint256 vestingRate,
-        bool vestingEnabled
-    );
-
-    event BackingConfigSet(
-        address indexed presale,
-        address indexed token,
-        address indexed creator,
-        uint256 backingShare,
-        address backingReceiver
-    );
-
-    /**
-     * @dev 构造函数 - 部署并初始化所有工厂合约
-     */
-    constructor(address _presaleImplementation) Ownable() {
-        // 部署各个工厂合约
-        tokenFactory = new TokenFactory();
-        presaleFactory = new PresaleFactory(_presaleImplementation);
-
-        // 授权Coordinator调用各工厂
-        tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(this));
-        presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(this));
-
-        emit CoordinatorInitialized(address(tokenFactory), address(presaleFactory));
+    constructor(address _tokenFactory, address _presaleFactory, address _router, address _dividendImplementation) {
+        if (_dividendImplementation == address(0)) revert DividendNotDeployed();
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        tokenFactory = TokenFactory(_tokenFactory);
+        presaleFactory = PresaleFactory(_presaleFactory);
+        routerAddress = _router;
+        dividendImplementation = _dividendImplementation;
     }
 
-    /**
-     * @dev 🎯 核心功能：创建代币和预售合约对（简化协调器模式）
-     *
-     * 协调器执行流程：
-     * 1. 调用TokenFactory创建Token合约
-     * 2. 调用PresaleFactory创建Presale合约
-     * 3. 直接建立Token和Presale的关联关系
-     * 4. 转移所有权给用户
-     * 5. 更新状态映射并发射事件
-     *
-     * 优势：
-     * - 每个工厂合约都在24KB限制内
-     * - 简化的架构，移除了ConfigManager
-     * - 保持完全的接口兼容性
-     * - 原子性操作（要么全成功要么全失败）
-     */
-    function createTokenAndPresale(TokenConfig memory tokenConfig, PresaleConfig memory presaleConfig)
+    modifier onlyAdmin() {
+        _checkRole(DEFAULT_ADMIN_ROLE);
+        _;
+    }
+
+    // ---------------------------------------------------------------------------
+    // 统一发币入口
+    // ---------------------------------------------------------------------------
+
+    /// @dev 创建代币（FlapTaxTokenV3 克隆）+ Pair + TaxProcessor + 托管仓（PRESALE 克隆）。
+    ///      代币全量存入托管仓，token 所有权归创建者；预售为可选步骤（见 setupPresale）。
+    ///      - 不开预售：创建者 claimAllTokens() 一次性领取全部代币
+    ///      - 开预售： 调用 setupPresale() 配置 30% 创建者 / 20% 底池 / 50% 预售
+    function createToken(TokenConfig memory tokenConfig)
         external
         payable
         nonReentrant
         returns (address token, address presale)
     {
-        // 🔍 步骤1: 基础验证
-        require(factoryEnabled, "STEP1_FACTORY_DISABLED");
-        require(msg.value >= creationFee, "STEP1_INSUFFICIENT_FEE");
-        require(bytes(tokenConfig.name).length > 0, "STEP1_EMPTY_TOKEN_NAME");
-        require(bytes(tokenConfig.symbol).length > 0, "STEP1_EMPTY_TOKEN_SYMBOL");
-        require(tokenConfig.totalSupply > 0, "STEP1_ZERO_TOTAL_SUPPLY");
-        require(presaleConfig.presaleEthAmount > 0, "STEP1_ZERO_PRESALE_AMOUNT");
+        if (!factoryEnabled) revert FactoryDisabled();
+        if (msg.value < creationFee) revert InsufficientCreationFee();
+        if (bytes(tokenConfig.name).length == 0) revert EmptyTokenName();
+        if (bytes(tokenConfig.symbol).length == 0) revert EmptyTokenSymbol();
 
-        // 🔍 步骤2: Token工厂验证
-        require(address(tokenFactory) != address(0), "STEP2_TOKEN_FACTORY_NULL");
+        // 四通道分配校验：合计必须恰好 10000（各项为 uint16 非负，合计约束即隐含单项 ≤ 100%）
+        if (
+            uint256(tokenConfig.creatorWalletBps) + tokenConfig.burnBps + tokenConfig.dividendBps
+                    + tokenConfig.liquidityBps != 10000
+        ) revert InvalidAllocationBps();
 
-        // 🎯 协调器模式实现 - 调用各个专门的工厂
+        // 步骤1: TokenFactory 部署克隆 + Pair + TaxProcessor
+        TokenFactory.TokenBundle memory bundle = tokenFactory.createToken(tokenConfig);
+        token = bundle.token;
+        if (token == address(0)) revert TokenCreationFailed();
 
-        // 步骤2: 通过TokenFactory创建Token合约
-        // 精度处理: Token 构造函数按原值铸造 (_mint 不乘 10^18),
-        // 而下方 approve 授权按 totalSupply * 10**18 计算。
-        // 因此这里统一乘 10**18 传给 TokenFactory,
-        // 使链上 totalSupply = 用户输入的整数枚数 * 10^18 (与 approve 一致)。
-        TokenFactory.TokenConfig memory tokenFactoryConfig = TokenFactory.TokenConfig({
-            name: tokenConfig.name,
-            symbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply * 10 ** 18,
-            feeBuy: tokenConfig.feeBuy,
-            feeSell: tokenConfig.feeSell,
-            feeRecipient: tokenConfig.feeRecipient,
-            lpBurnEnabled: tokenConfig.lpBurnEnabled,
-            lpBurnFrequency: tokenConfig.lpBurnFrequency,
-            percentForLPBurn: tokenConfig.percentForLPBurn,
-            burnLimit: tokenConfig.burnLimit,
-            protectTime: tokenConfig.protectTime,
-            protectFee: tokenConfig.protectFee,
-            isInsideSell: tokenConfig.isInsideSell,
-            swapThreshold: tokenConfig.swapThreshold
-        });
+        // 步骤2: 部署 TaxProcessor（部署者=本合约，保证 initialize 权限）
+        address taxProcessor = address(new TaxProcessor());
 
-        // 🔍 步骤3: 创建Token
-        token = tokenFactory.createToken(tokenFactoryConfig);
-        require(token != address(0), "STEP3_TOKEN_CREATION_FAILED");
+        // 步骤2b: 分红通道启用时部署 Dividend 克隆并初始化
+        //         owner = 本合约（平台托管管理权，与上游 Portal 持有模式一致）；
+        //         dividendToken = WBNB → 持有者 withdrawDividends 时自动解包为原生 BNB
+        address dividend = address(0);
+        if (tokenConfig.dividendBps > 0) {
+            dividend = Clones.clone(dividendImplementation);
+            IPlatformDividend(dividend).initialize(_wbnb(), token, tokenConfig.minHolderBalance);
+            tokenDividends[token] = dividend;
+            emit DividendCreated(token, dividend);
+        }
 
-        // 🔍 步骤4: Presale工厂验证
-        require(address(presaleFactory) != address(0), "STEP4_PRESALE_FACTORY_NULL");
+        // 步骤3: 初始化 V3 代币（msg.sender=本合约 → 全量代币铸给本合约）
+        IFlapTaxTokenV3(token).initialize(_buildInitParams(tokenConfig, bundle, taxProcessor));
 
-        // 步骤4: 通过PresaleFactory创建Presale合约
-        PresaleFactory.PresaleConfig memory presaleFactoryConfig = PresaleFactory.PresaleConfig({
-            presaleEthAmount: presaleConfig.presaleEthAmount,
-            tradeEthAmount: presaleConfig.tradeEthAmount,
-            maxTotalNum: presaleConfig.maxTotalNum,
-            presaleMaxNum: presaleConfig.presaleMaxNum,
-            marketDisAmount: presaleConfig.marketDisAmount,
-            userLPShare: presaleConfig.userLPShare,
-            devLPShare: presaleConfig.devLPShare,
-            devLPReceiver: presaleConfig.devLPReceiver,
-            lpDistributionEnabled: presaleConfig.lpDistributionEnabled,
-            // LGE集成参数
-            startTime: presaleConfig.startTime,
-            hardcap: presaleConfig.hardcap,
-            maxBuyPerWallet: presaleConfig.maxBuyPerWallet,
-            vestingDelay: presaleConfig.vestingDelay,
-            vestingRate: presaleConfig.vestingRate,
-            vestingEnabled: presaleConfig.vestingEnabled,
-            backingShare: presaleConfig.backingShare,
-            backingReceiver: presaleConfig.backingReceiver
-        });
-
-        // 🔍 步骤5: 创建Presale
-        presale = presaleFactory.createPresale(presaleFactoryConfig);
-        require(presale != address(0), "STEP5_PRESALE_CREATION_FAILED");
-
-        // 🔍 步骤5.1: 触发LEG相关事件
-        // 触发LGE基础配置事件（如果有配置）
-        if (presaleConfig.startTime > 0 || presaleConfig.hardcap > 0 || presaleConfig.maxBuyPerWallet > 0) {
-            emit LGEConfigSet(
-                presale,
-                token,
-                msg.sender,
-                presaleConfig.startTime,
-                presaleConfig.hardcap,
-                presaleConfig.maxBuyPerWallet
+        // 步骤4: 初始化 TaxProcessor（平台不抽成：feeRate=0；四通道 bps 由创建者表单配置）
+        ITaxProcessor(taxProcessor)
+            .initialize(
+                TaxProcessorInitParams({
+                quoteToken: _wbnb(),
+                router: routerAddress,
+                feeReceiver: tokenConfig.feeRecipient,
+                marketAddress: tokenConfig.marketReceiver,
+                dividendAddress: dividend,
+                taxToken: token,
+                feeRate: 0, // 平台不抽成，四通道合计 100%
+                marketBps: tokenConfig.creatorWalletBps,
+                deflationBps: tokenConfig.burnBps,
+                lpBps: tokenConfig.liquidityBps,
+                dividendBps: tokenConfig.dividendBps,
+                dividendToken: address(0),
+                commissionReceiver: address(0),
+                commissionBps: 0,
+                converter: address(0),
+                liqExpectedOutputAmount: tokenConfig.liqExpectedOutputAmount
+            })
             );
-        }
 
-        // 触发Vesting配置事件（如果启用）
-        if (presaleConfig.vestingEnabled) {
-            emit VestingConfigSet(
-                presale,
-                token,
-                msg.sender,
-                presaleConfig.vestingDelay,
-                presaleConfig.vestingRate,
-                presaleConfig.vestingEnabled
-            );
-        }
+        // 步骤5: 创建托管仓（PRESALE 克隆，未配置预售）
+        presale = presaleFactory.createPresale(routerAddress);
+        PRESALE(payable(presale)).setCoinAndPair(token, bundle.pair);
 
-        // 触发Backing配置事件（如果有backing份额）
-        if (presaleConfig.backingShare > 0) {
-            emit BackingConfigSet(presale, token, msg.sender, presaleConfig.backingShare, presaleConfig.backingReceiver);
-        }
+        // 步骤5: 全量代币转入托管仓
+        uint256 supply = IERC20(token).balanceOf(address(this));
+        if (supply == 0) revert NoSupply();
+        bool transferOk = IERC20(token).transfer(presale, supply);
+        if (!transferOk) revert TokenTransferFailed();
 
-        // 🔍 步骤6: 开始关联设置
-        // 步骤6: 直接建立关联关系（CoordinatorFactory有权限）
-        // 🔍 步骤6.1: 设置代币白名单
-        address[] memory presaleArray = new address[](1);
-        presaleArray[0] = presale;
-        StagedCustomToken(payable(token)).setExcludeFee(presaleArray, true);
-        // 移除 try-catch，直接调用，让原始错误信息传递
-
-        // 🔍 步骤6.2: 计算代币总量
-        uint256 totalSupplyWithDecimals = tokenConfig.totalSupply * 10 ** 18;
-        require(totalSupplyWithDecimals > 0, "STEP6_2_INVALID_TOTAL_SUPPLY");
-
-        // 🔍 步骤6.3: 授权预售合约
-        try StagedCustomToken(payable(token)).approve(presale, totalSupplyWithDecimals) {
-        // 成功
-        }
-        catch {
-            revert("STEP6_3_APPROVE_FAILED");
-        }
-
-        // 🔍 步骤6.4: 设置代币地址到预售合约
-        try PRESALE(payable(presale)).setCoinAddress(token) {
-        // 成功
-        }
-        catch {
-            revert("STEP6_4_SET_COIN_ADDRESS_FAILED");
-        }
-
-        // 🔍 步骤6.5: 设置预售合约地址到代币
-        try StagedCustomToken(payable(token)).setPresaleContract(presale) {
-        // 成功
-        }
-        catch {
-            revert("STEP6_5_SET_PRESALE_CONTRACT_FAILED");
-        }
-
-        // 发射关联事件
-        emit TokenPresaleLinked(token, presale);
-
-        // 🔍 步骤7: 转移所有权
-        // 🔍 步骤7.1: 转移Token所有权
-        try StagedCustomToken(payable(token)).transferOwnership(msg.sender) {
-        // 成功
-        }
-        catch {
-            revert("STEP7_1_TOKEN_OWNERSHIP_TRANSFER_FAILED");
-        }
-
-        // 🔍 步骤7.2: 转移Presale所有权
-        try PRESALE(payable(presale)).transferOwnership(msg.sender) {
-        // 成功
-        }
-        catch {
-            revert("STEP7_2_PRESALE_OWNERSHIP_TRANSFER_FAILED");
-        }
-
-        // 发射所有权转移事件
+        // 步骤6: 授权协调器为配置方（供 setupPresale 配置），再将所有权交付创建者
+        PRESALE(payable(presale)).setConfigurator(address(this));
+        ITokenMigration(token).transferOwnership(msg.sender);
+        PRESALE(payable(presale)).transferOwnership(msg.sender);
         emit OwnershipTransferred(token, presale, msg.sender);
 
-        // 步骤5: 更新Coordinator状态映射
+        // 步骤7: 状态注册
         tokenPresales[token] = presale;
         presaleTokens[presale] = token;
         tokenCreators[token] = msg.sender;
         totalPairsCreated++;
 
-        // 步骤5.1: 更新查询支持数据结构
         creatorTokens[msg.sender].push(token);
         allTokens.push(token);
 
-        // 记录详细信息
         tokenPairDetails[token] = TokenPresalePair({
             tokenAddress: token,
             presaleAddress: presale,
@@ -574,500 +209,203 @@ contract CoordinatorFactory is Ownable, ReentrancyGuard {
             createdAt: block.timestamp,
             tokenName: tokenConfig.name,
             tokenSymbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply
+            totalSupply: supply
         });
 
-        // 步骤6: 发射事件（保持兼容性）
-        emit TokenPresalePairCreated(token, presale, msg.sender, tokenConfig.totalSupply);
+        emit TokenPresalePairCreated(token, presale, msg.sender, supply);
+
+        // 步骤8: 退还多付的创建费（退款失败整笔回滚，绝不吞用户资金）
+        if (msg.value > creationFee) {
+            uint256 refund = msg.value - creationFee;
+            TransferHelper.safeTransferETH(msg.sender, refund);
+            emit ExcessRefunded(msg.sender, refund);
+        }
 
         return (token, presale);
     }
 
-    /**
-     * @dev 简单模式发币：只创建 Token，不需要预售合约
-     * 1. 调用 TokenFactory 创建 Token 合约（代币初始铸造给 CoordinatorFactory）
-     * 2. 将铸造的总代币全额划转给创建者 (msg.sender)
-     * 3. 将 Token 合约所有权转移给创建者 (msg.sender)
-     * 4. 更新状态映射并触发事件，创建者拿回代币和所有权后可直接去 PancakeSwap 添加流动性开盘
-     */
-    function createSimpleToken(TokenConfig memory tokenConfig) external payable nonReentrant returns (address token) {
-        // 步骤1: 基础验证
-        require(factoryEnabled, "STEP1_FACTORY_DISABLED");
-        require(msg.value >= creationFee, "STEP1_INSUFFICIENT_FEE");
-        require(bytes(tokenConfig.name).length > 0, "STEP1_EMPTY_TOKEN_NAME");
-        require(bytes(tokenConfig.symbol).length > 0, "STEP1_EMPTY_TOKEN_SYMBOL");
-        require(tokenConfig.totalSupply > 0, "STEP1_ZERO_TOTAL_SUPPLY");
+    /// @dev 为已创建代币开启预售：份额 30% 创建者 / 20% 底池 / 50% 预售由合约写死计算，
+    ///      仅价格/上限/vesting 等由创建者配置；token 所有权移交由创建者自行执行
+    ///      （供 launch() 编排 startMigration → 加池 → finalizeMigration → renounceOwnership）
+    function setupPresale(address token, PresaleConfig memory presaleConfig) external nonReentrant {
+        address presale = tokenPresales[token];
+        if (presale == address(0)) revert TokenNotRegistered();
+        if (tokenCreators[token] != msg.sender) revert NotTokenCreator();
+        if (presaleConfig.presaleTokenPrice == 0) revert InvalidPrice();
 
-        // 步骤2: Token工厂验证
-        require(address(tokenFactory) != address(0), "STEP2_TOKEN_FACTORY_NULL");
+        // 固定份额规则：30% 创建者 / 20% 底池 / 50% 预售（基于代币总供应量）
+        uint256 supply = IERC20(token).balanceOf(presale);
+        if (supply == 0) revert NoSupply();
+        uint256 creatorShare = (supply * 30) / 100;
+        uint256 poolShare = (supply * 20) / 100;
+        uint256 presaleShare = (supply * 50) / 100;
 
-        TokenFactory.TokenConfig memory tokenFactoryConfig = TokenFactory.TokenConfig({
-            name: tokenConfig.name,
-            symbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply * 10 ** 18,
-            feeBuy: tokenConfig.feeBuy,
-            feeSell: tokenConfig.feeSell,
-            feeRecipient: tokenConfig.feeRecipient,
-            lpBurnEnabled: tokenConfig.lpBurnEnabled,
-            lpBurnFrequency: tokenConfig.lpBurnFrequency,
-            percentForLPBurn: tokenConfig.percentForLPBurn,
-            burnLimit: tokenConfig.burnLimit,
-            protectTime: tokenConfig.protectTime,
-            protectFee: tokenConfig.protectFee,
-            isInsideSell: tokenConfig.isInsideSell,
-            swapThreshold: tokenConfig.swapThreshold
-        });
-
-        // 步骤3: 通过 TokenFactory 创建 Token
-        token = tokenFactory.createToken(tokenFactoryConfig);
-        require(token != address(0), "STEP3_TOKEN_CREATION_FAILED");
-
-        // 步骤4: 计算带精度的总供应量，将代币从 CoordinatorFactory 全额划转给创建者 (msg.sender)
-        uint256 totalSupplyWithDecimals = tokenConfig.totalSupply * 10 ** 18;
-        require(totalSupplyWithDecimals > 0, "STEP4_INVALID_TOTAL_SUPPLY");
-
-        bool transferSuccess = IERC20(token).transfer(msg.sender, totalSupplyWithDecimals);
-        require(transferSuccess, "STEP4_TOKEN_TRANSFER_FAILED");
-
-        // 步骤5: 转移 Token 所有权给创建者 (msg.sender)
-        try StagedCustomToken(payable(token)).transferOwnership(msg.sender) {
-        // 成功
+        PRESALE p = PRESALE(payable(presale));
+        p.configureLaunch(true, msg.sender, creatorShare, poolShare, presaleShare);
+        p.setPresaleTerms(
+            presaleConfig.presaleTokenPrice,
+            presaleShare, // 认购上限 = 预售份额（50%），不可由用户配置
+            presaleConfig.maxBuyPerWallet,
+            presaleConfig.hardcap,
+            presaleConfig.minLiquidityAmount,
+            presaleConfig.startTime
+        );
+        // vesting 恒开启（产品规则），仅节奏可配
+        p.setVestingConfig(presaleConfig.vestingDelay, presaleConfig.vestingRate);
+        if (presaleConfig.slippage > 0) {
+            p.setSlippageProtection(presaleConfig.slippage);
         }
-        catch {
-            revert("STEP5_TOKEN_OWNERSHIP_TRANSFER_FAILED");
-        }
+        // 每钱包认购上限必须为正：0 会导致 subscribe() 恒 revert，整单报废
+        if (presaleConfig.maxBuyPerWallet == 0) revert InvalidMaxBuyPerWallet();
 
-        // 发射所有权转移事件（预售合约传零地址）
-        emit OwnershipTransferred(token, address(0), msg.sender);
-
-        // 步骤6: 更新 Coordinator 状态映射
-        tokenCreators[token] = msg.sender;
-        totalPairsCreated++;
-
-        // 更新查询支持数据结构
-        creatorTokens[msg.sender].push(token);
-        allTokens.push(token);
-
-        tokenPairDetails[token] = TokenPresalePair({
-            tokenAddress: token,
-            presaleAddress: address(0), // 简单模式没有预售合约，传零地址
-            creator: msg.sender,
-            createdAt: block.timestamp,
-            tokenName: tokenConfig.name,
-            tokenSymbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply
-        });
-
-        // 发射配对创建事件（保持与现有 DApp 界面和索引兼容，presale 传零地址）
-        emit TokenPresalePairCreated(token, address(0), msg.sender, tokenConfig.totalSupply);
-
-        return token;
+        emit PresaleSetup(token, presale, creatorShare, poolShare, presaleShare);
     }
 
-    /**
-     * @dev 简单模式发币（带 8888 靓号）：使用 CREATE2 部署 Token，无需预售合约
-     */
-    function createSimpleTokenWithSalt(TokenConfig memory tokenConfig, bytes32 salt)
-        external
-        payable
-        nonReentrant
-        returns (address token)
-    {
-        // 步骤1: 基础验证
-        require(factoryEnabled, "STEP1_FACTORY_DISABLED");
-        require(msg.value >= creationFee, "STEP1_INSUFFICIENT_FEE");
-        require(bytes(tokenConfig.name).length > 0, "STEP1_EMPTY_TOKEN_NAME");
-        require(bytes(tokenConfig.symbol).length > 0, "STEP1_EMPTY_TOKEN_SYMBOL");
-        require(tokenConfig.totalSupply > 0, "STEP1_ZERO_TOTAL_SUPPLY");
-
-        // 步骤2: Token工厂验证
-        require(address(tokenFactory) != address(0), "STEP2_TOKEN_FACTORY_NULL");
-
-        TokenFactory.TokenConfig memory tokenFactoryConfig = TokenFactory.TokenConfig({
-            name: tokenConfig.name,
-            symbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply * 10 ** 18,
-            feeBuy: tokenConfig.feeBuy,
-            feeSell: tokenConfig.feeSell,
-            feeRecipient: tokenConfig.feeRecipient,
-            lpBurnEnabled: tokenConfig.lpBurnEnabled,
-            lpBurnFrequency: tokenConfig.lpBurnFrequency,
-            percentForLPBurn: tokenConfig.percentForLPBurn,
-            burnLimit: tokenConfig.burnLimit,
-            protectTime: tokenConfig.protectTime,
-            protectFee: tokenConfig.protectFee,
-            isInsideSell: tokenConfig.isInsideSell,
-            swapThreshold: tokenConfig.swapThreshold
-        });
-
-        // 步骤3: 通过 TokenFactory 使用 CREATE2 创建 8888 靓号 Token
-        token = tokenFactory.createTokenWithSalt(tokenFactoryConfig, salt);
-        require(token != address(0), "STEP3_TOKEN_CREATION_FAILED");
-
-        // 步骤4: 计算带精度的总供应量，将代币从 CoordinatorFactory 全额划转给创建者 (msg.sender)
-        uint256 totalSupplyWithDecimals = tokenConfig.totalSupply * 10 ** 18;
-        require(totalSupplyWithDecimals > 0, "STEP4_INVALID_TOTAL_SUPPLY");
-
-        bool transferSuccess = IERC20(token).transfer(msg.sender, totalSupplyWithDecimals);
-        require(transferSuccess, "STEP4_TOKEN_TRANSFER_FAILED");
-
-        // 步骤5: 转移 Token 所有权给创建者 (msg.sender)
-        try StagedCustomToken(payable(token)).transferOwnership(msg.sender) {
-        // 成功
-        }
-        catch {
-            revert("STEP5_TOKEN_OWNERSHIP_TRANSFER_FAILED");
-        }
-
-        // 发射所有权转移事件（预售合约传零地址）
-        emit OwnershipTransferred(token, address(0), msg.sender);
-
-        // 步骤6: 更新 Coordinator 状态映射
-        tokenCreators[token] = msg.sender;
-        totalPairsCreated++;
-
-        // 更新查询支持数据结构
-        creatorTokens[msg.sender].push(token);
-        allTokens.push(token);
-
-        tokenPairDetails[token] = TokenPresalePair({
-            tokenAddress: token,
-            presaleAddress: address(0), // 简单模式没有预售合约，传零地址
-            creator: msg.sender,
-            createdAt: block.timestamp,
-            tokenName: tokenConfig.name,
-            tokenSymbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply
-        });
-
-        // 发射配对创建事件（保持与现有 DApp 界面和索引兼容，presale 传零地址）
-        emit TokenPresalePairCreated(token, address(0), msg.sender, tokenConfig.totalSupply);
-
-        return token;
-    }
-
-    /**
-     * @dev  靓号发币功能：创建代币和预售合约对（使用 CREATE2 部署 8888 靓号 Token）
-     */
-    function createTokenAndPresaleWithSalt(
+    function _buildInitParams(
         TokenConfig memory tokenConfig,
-        PresaleConfig memory presaleConfig,
-        bytes32 salt
-    ) external payable nonReentrant returns (address token, address presale) {
-        // 步骤1: 基础验证
-        require(factoryEnabled, "STEP1_FACTORY_DISABLED");
-        require(msg.value >= creationFee, "STEP1_INSUFFICIENT_FEE");
-        require(bytes(tokenConfig.name).length > 0, "STEP1_EMPTY_TOKEN_NAME");
-        require(bytes(tokenConfig.symbol).length > 0, "STEP1_EMPTY_TOKEN_SYMBOL");
-        require(tokenConfig.totalSupply > 0, "STEP1_ZERO_TOTAL_SUPPLY");
-        require(presaleConfig.presaleEthAmount > 0, "STEP1_ZERO_PRESALE_AMOUNT");
+        TokenFactory.TokenBundle memory bundle,
+        address taxProcessor
+    ) internal view returns (IFlapTaxTokenV3.InitParams memory) {
+        address[] memory pools = new address[](1);
+        pools[0] = bundle.pair;
 
-        // 步骤2: Token工厂验证
-        require(address(tokenFactory) != address(0), "STEP2_TOKEN_FACTORY_NULL");
-
-        TokenFactory.TokenConfig memory tokenFactoryConfig = TokenFactory.TokenConfig({
+        return IFlapTaxTokenV3.InitParams({
             name: tokenConfig.name,
             symbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply * 10 ** 18,
-            feeBuy: tokenConfig.feeBuy,
-            feeSell: tokenConfig.feeSell,
-            feeRecipient: tokenConfig.feeRecipient,
-            lpBurnEnabled: tokenConfig.lpBurnEnabled,
-            lpBurnFrequency: tokenConfig.lpBurnFrequency,
-            percentForLPBurn: tokenConfig.percentForLPBurn,
-            burnLimit: tokenConfig.burnLimit,
-            protectTime: tokenConfig.protectTime,
-            protectFee: tokenConfig.protectFee,
-            isInsideSell: tokenConfig.isInsideSell,
-            swapThreshold: tokenConfig.swapThreshold
+            meta: "",
+            buyTax: uint16(tokenConfig.feeBuy),
+            sellTax: uint16(tokenConfig.feeSell),
+            taxProcessor: taxProcessor,
+            dividendContract: address(0),
+            quoteToken: _wbnb(),
+            liqExpectedOutputAmount: tokenConfig.liqExpectedOutputAmount,
+            taxDuration: tokenConfig.taxDuration,
+            pools: pools,
+            v2Router: routerAddress,
+            antiFarmerDuration: tokenConfig.antiFarmerDuration
         });
-
-        // 步骤3: 通过 TokenFactory 使用 CREATE2 创建 8888 靓号 Token
-        token = tokenFactory.createTokenWithSalt(tokenFactoryConfig, salt);
-        require(token != address(0), "STEP3_TOKEN_CREATION_FAILED");
-
-        // 步骤4: Presale工厂验证
-        require(address(presaleFactory) != address(0), "STEP4_PRESALE_FACTORY_NULL");
-
-        PresaleFactory.PresaleConfig memory presaleFactoryConfig = PresaleFactory.PresaleConfig({
-            presaleEthAmount: presaleConfig.presaleEthAmount,
-            tradeEthAmount: presaleConfig.tradeEthAmount,
-            maxTotalNum: presaleConfig.maxTotalNum,
-            presaleMaxNum: presaleConfig.presaleMaxNum,
-            marketDisAmount: presaleConfig.marketDisAmount,
-            userLPShare: presaleConfig.userLPShare,
-            devLPShare: presaleConfig.devLPShare,
-            devLPReceiver: presaleConfig.devLPReceiver,
-            lpDistributionEnabled: presaleConfig.lpDistributionEnabled,
-            startTime: presaleConfig.startTime,
-            hardcap: presaleConfig.hardcap,
-            maxBuyPerWallet: presaleConfig.maxBuyPerWallet,
-            vestingDelay: presaleConfig.vestingDelay,
-            vestingRate: presaleConfig.vestingRate,
-            vestingEnabled: presaleConfig.vestingEnabled,
-            backingShare: presaleConfig.backingShare,
-            backingReceiver: presaleConfig.backingReceiver
-        });
-
-        // 步骤5: 创建Presale
-        presale = presaleFactory.createPresale(presaleFactoryConfig);
-        require(presale != address(0), "STEP5_PRESALE_CREATION_FAILED");
-
-        if (presaleConfig.startTime > 0 || presaleConfig.hardcap > 0 || presaleConfig.maxBuyPerWallet > 0) {
-            emit LGEConfigSet(
-                presale,
-                token,
-                msg.sender,
-                presaleConfig.startTime,
-                presaleConfig.hardcap,
-                presaleConfig.maxBuyPerWallet
-            );
-        }
-
-        if (presaleConfig.vestingEnabled) {
-            emit VestingConfigSet(
-                presale,
-                token,
-                msg.sender,
-                presaleConfig.vestingDelay,
-                presaleConfig.vestingRate,
-                presaleConfig.vestingEnabled
-            );
-        }
-
-        if (presaleConfig.backingShare > 0) {
-            emit BackingConfigSet(presale, token, msg.sender, presaleConfig.backingShare, presaleConfig.backingReceiver);
-        }
-
-        // 步骤6: 关联设置
-        address[] memory presaleArray = new address[](1);
-        presaleArray[0] = presale;
-        StagedCustomToken(payable(token)).setExcludeFee(presaleArray, true);
-
-        uint256 totalSupplyWithDecimals = tokenConfig.totalSupply * 10 ** 18;
-        require(totalSupplyWithDecimals > 0, "STEP6_2_INVALID_TOTAL_SUPPLY");
-
-        try StagedCustomToken(payable(token)).approve(presale, totalSupplyWithDecimals) {}
-        catch {
-            revert("STEP6_3_APPROVE_FAILED");
-        }
-
-        try PRESALE(payable(presale)).setCoinAddress(token) {}
-        catch {
-            revert("STEP6_4_SET_COIN_ADDRESS_FAILED");
-        }
-
-        try StagedCustomToken(payable(token)).setPresaleContract(presale) {}
-        catch {
-            revert("STEP6_5_SET_PRESALE_CONTRACT_FAILED");
-        }
-
-        emit TokenPresaleLinked(token, presale);
-
-        // 步骤7: 转移所有权
-        try StagedCustomToken(payable(token)).transferOwnership(msg.sender) {}
-        catch {
-            revert("STEP7_1_TOKEN_OWNERSHIP_TRANSFER_FAILED");
-        }
-
-        try PRESALE(payable(presale)).transferOwnership(msg.sender) {}
-        catch {
-            revert("STEP7_2_PRESALE_OWNERSHIP_TRANSFER_FAILED");
-        }
-
-        emit OwnershipTransferred(token, presale, msg.sender);
-
-        tokenPresales[token] = presale;
-        presaleTokens[presale] = token;
-        tokenCreators[token] = msg.sender;
-        totalPairsCreated++;
-
-        creatorTokens[msg.sender].push(token);
-        allTokens.push(token);
-
-        tokenPairDetails[token] = TokenPresalePair({
-            tokenAddress: token,
-            presaleAddress: presale,
-            creator: msg.sender,
-            createdAt: block.timestamp,
-            tokenName: tokenConfig.name,
-            tokenSymbol: tokenConfig.symbol,
-            totalSupply: tokenConfig.totalSupply
-        });
-
-        emit TokenPresalePairCreated(token, presale, msg.sender, tokenConfig.totalSupply);
-
-        return (token, presale);
     }
 
-    // ============================================================================
-    // 📋 查询和管理函数（保持向后兼容）
-    // ============================================================================
+    function _wbnb() internal view returns (address) {
+        return IPancakeRouter02(routerAddress).WETH();
+    }
 
-    /**
-     * @dev 获取Token对应的Presale地址
-     */
+    // ---------------------------------------------------------------------------
+    // 管理
+    // ---------------------------------------------------------------------------
+
+    function setFactoryEnabled(bool _enabled) external onlyAdmin {
+        factoryEnabled = _enabled;
+        emit FactoryEnabledSet(_enabled);
+    }
+
+    function setCreationFee(uint256 _fee) external onlyAdmin {
+        creationFee = _fee;
+        emit CreationFeeSet(_fee);
+    }
+
+    function withdrawFees() external onlyAdmin {
+        uint256 balance = address(this).balance;
+        if (balance == 0) revert NoFeesToWithdraw();
+        (bool success,) = msg.sender.call{value: balance}(new bytes(0));
+        if (!success) revert WithdrawFailed();
+        emit FeesWithdrawn(balance, msg.sender);
+    }
+
+    // ---------------------------------------------------------------------------
+    // 平台侧 Dividend 管理（owner = 本合约；透传给对应代币的 Dividend 实例）
+    // ---------------------------------------------------------------------------
+
+    modifier onlyDividend(address token) {
+        address dividend = tokenDividends[token];
+        if (dividend == address(0)) revert DividendNotDeployed();
+        _;
+    }
+
+    /// @notice 将某地址排除出指定代币的分红资格（如新池子、交易所地址）
+    function dividendExcludeAddress(address token, address account) external onlyAdmin onlyDividend(token) {
+        IPlatformDividend(tokenDividends[token]).excludeAddress(account);
+    }
+
+    /// @notice 恢复某地址的分红资格
+    function dividendUnexcludeAddress(address token, address account) external onlyAdmin onlyDividend(token) {
+        IPlatformDividend(tokenDividends[token]).unexcludeAddress(account);
+    }
+
+    /// @notice 调整分红资格最低持仓（代币 wei）
+    function dividendSetMinShareBalance(address token, uint256 minBalance) external onlyAdmin onlyDividend(token) {
+        IPlatformDividend(tokenDividends[token]).setMinimumShareBalance(minBalance);
+    }
+
+    /// @notice 紧急提取 Dividend 实例内滞留资产（token=address(0) 表示原生 BNB）
+    function dividendEmergencyWithdraw(address token, address asset, uint256 amount, address to)
+        external
+        onlyAdmin
+        onlyDividend(token)
+    {
+        IPlatformDividend(tokenDividends[token]).emergencyWithdraw(asset, amount, to);
+    }
+
+    // ---------------------------------------------------------------------------
+    // 查询
+    // ---------------------------------------------------------------------------
+
     function getTokenPresale(address token) external view returns (address) {
         return tokenPresales[token];
     }
 
-    /**
-     * @dev 获取Presale对应的Token地址
-     */
     function getPresaleToken(address presale) external view returns (address) {
         return presaleTokens[presale];
     }
 
-    /**
-     * @dev 获取Token的创建者
-     */
     function getTokenCreator(address token) external view returns (address) {
         return tokenCreators[token];
     }
 
-    /**
-     * @dev 获取工厂合约地址（用于调试和验证）
-     */
     function getFactoryAddresses() external view returns (address _tokenFactory, address _presaleFactory) {
         return (address(tokenFactory), address(presaleFactory));
     }
 
-    // ============================================================================
-    // 📊 查询功能
-    // ============================================================================
-
-    /**
-     * @dev 根据创建者地址查询代币预售合约对（分页）
-     * @param creator 创建者地址
-     * @param offset 偏移量
-     * @param limit 限制数量
-     * @return pairs 代币预售合约对数组
-     * @return total 该创建者的总数量
-     */
     function getTokenPresalePairsByCreator(address creator, uint256 offset, uint256 limit)
         external
         view
-        returns (TokenPresalePair[] memory pairs, uint256 total)
+        returns (TokenPresalePair[] memory)
     {
-        address[] memory creatorTokenList = creatorTokens[creator];
-        total = creatorTokenList.length;
-
-        if (offset >= total) {
-            return (new TokenPresalePair[](0), total);
-        }
-
-        uint256 end = offset + limit;
-        if (end > total) {
-            end = total;
-        }
-
-        uint256 resultLength = end - offset;
-        pairs = new TokenPresalePair[](resultLength);
-
-        for (uint256 i = 0; i < resultLength; i++) {
-            address tokenAddr = creatorTokenList[offset + i];
-            pairs[i] = tokenPairDetails[tokenAddr];
-        }
-
-        return (pairs, total);
+        address[] storage tokens = creatorTokens[creator];
+        return _slicePairs(tokens, offset, limit);
     }
 
-    /**
-     * @dev 获取所有代币预售合约对（分页）
-     * @param offset 偏移量
-     * @param limit 限制数量
-     * @return pairs 代币预售合约对数组
-     * @return total 总数量
-     */
-    function getAllTokenPresalePairs(uint256 offset, uint256 limit)
-        external
+    function getAllTokenPresalePairs(uint256 offset, uint256 limit) external view returns (TokenPresalePair[] memory) {
+        return _slicePairs(allTokens, offset, limit);
+    }
+
+    function _slicePairs(address[] storage tokens, uint256 offset, uint256 limit)
+        internal
         view
-        returns (TokenPresalePair[] memory pairs, uint256 total)
+        returns (TokenPresalePair[] memory pairs)
     {
-        total = allTokens.length;
-
-        if (offset >= total) {
-            return (new TokenPresalePair[](0), total);
-        }
-
         uint256 end = offset + limit;
-        if (end > total) {
-            end = total;
+        if (end > tokens.length) end = tokens.length;
+        if (offset >= tokens.length) return new TokenPresalePair[](0);
+        pairs = new TokenPresalePair[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            pairs[i - offset] = tokenPairDetails[tokens[i]];
         }
-
-        uint256 resultLength = end - offset;
-        pairs = new TokenPresalePair[](resultLength);
-
-        for (uint256 i = 0; i < resultLength; i++) {
-            address tokenAddr = allTokens[offset + i];
-            pairs[i] = tokenPairDetails[tokenAddr];
-        }
-
-        return (pairs, total);
     }
 
-    /**
-     * @dev 根据代币地址获取详细信息
-     * @param tokenAddress 代币地址
-     * @return pair 代币预售合约对信息
-     */
     function getTokenPresalePairDetails(address tokenAddress) external view returns (TokenPresalePair memory pair) {
         return tokenPairDetails[tokenAddress];
     }
 
-    /**
-     * @dev 获取创建者的代币数量
-     * @param creator 创建者地址
-     * @return count 代币数量
-     */
     function getCreatorTokenCount(address creator) external view returns (uint256 count) {
         return creatorTokens[creator].length;
     }
 
-    /**
-     * @dev 获取总代币数量
-     * @return count 总代币数量
-     */
     function getTotalTokenCount() external view returns (uint256 count) {
         return allTokens.length;
     }
 
-    /**
-     * @dev 检查代币是否存在
-     * @param tokenAddress 代币地址
-     * @return exists 是否存在
-     */
     function tokenExists(address tokenAddress) external view returns (bool exists) {
-        return tokenPairDetails[tokenAddress].tokenAddress != address(0);
+        return tokenCreators[tokenAddress] != address(0);
     }
-
-    // ============================================================================
-    // 🔧 管理员功能
-    // ============================================================================
-
-    /**
-     * @dev 设置工厂启用状态
-     */
-    function setFactoryEnabled(bool _enabled) external onlyOwner {
-        factoryEnabled = _enabled;
-    }
-
-    /**
-     * @dev 设置创建费用
-     */
-    function setCreationFee(uint256 _fee) external onlyOwner {
-        creationFee = _fee;
-    }
-
-    /**
-     * @dev 提取费用
-     */
-    function withdrawFees() external onlyOwner {
-        payable(owner()).transfer(address(this).balance);
-    }
-
-    /**
-     * @dev 接收ETH
-     */
-    receive() external payable {}
 }

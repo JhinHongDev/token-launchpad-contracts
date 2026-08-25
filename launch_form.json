@@ -1,0 +1,25 @@
+{
+  "name": "邢道荣",
+  "symbol": "邢道荣",
+  "desc": "说出吾名，逗汝一笑！吾乃三国第一猛将邢道荣是也！",
+  "taxPercentage": "1%",
+  "buyTaxPercentage": "2%",
+  "sellTaxPercentage": "2%",
+  "taxAllocMarketing": 0,
+  "taxAllocBurn": 0,
+  "taxAllocDividend": 100,
+  "taxAllocLiquidity": 0,
+  "minimumBalanceForDividend": "10000",
+  "antiFarmerDays": 0,
+  "revenueShare": false,
+  "beneficiaryAddress": "0xde9fB6fd189e802bce892058c26aa148eBEdB3Fa",
+  "paymentToken": "BNB",
+  "creatorPurchaseInput": {
+    "chainId": "bnb",
+    "paymentSymbol": "BNB",
+    "unit": "quote",
+    "value": ""
+  },
+  "nonTaxFeeMode": "holder",
+  "nonTaxCreateFeeRecipient": "0xde9fB6fd189e802bce892058c26aa148eBEdB3Fa"
+}
