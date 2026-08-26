@@ -2,12 +2,10 @@
 
 pragma solidity ^0.8.24;
 
-// Vendored verbatim from flap.sh production (BSC 0x0e7Effa4fb7C528BBc65296f9A7580b3a63Df9C5, MIT).
-// Only the import paths below were adjusted to this repository's layout; logic is byte-identical.
 import "@openzeppelin-contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
-import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
-import {IDividend} from "./IDividend.sol";
+import {SafeTransferLib} from "src/lib/dividend/SafeTransferLib.sol";
+import {FixedPointMathLib} from "src/lib/dividend/FixedPointMathLib.sol";
+import {IDividend} from "src/lib/dividend/IDividend.sol";
 
 interface IWETH {
     function withdraw(uint256) external;
