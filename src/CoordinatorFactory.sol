@@ -35,6 +35,7 @@ error InvalidAllocationBps();
 error DividendNotDeployed();
 error RefundFailed();
 error InvalidMaxBuyPerWallet();
+error ZeroCreationFee();
 
 /// @notice 平台侧对每代币 Dividend 实例的管理子集（完整接口见 src/lib/dividend/IDividend.sol）
 interface IPlatformDividend {
@@ -300,6 +301,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     }
 
     function setCreationFee(uint256 _fee) external onlyAdmin {
+        if (_fee == 0) revert ZeroCreationFee();
         creationFee = _fee;
         emit CreationFeeSet(_fee);
     }
