@@ -21,3 +21,4 @@ docs/
 
 .ref_tmp/
 .vscode/
+.codegraph/
