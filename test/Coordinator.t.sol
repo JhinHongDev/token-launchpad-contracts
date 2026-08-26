@@ -239,6 +239,8 @@ contract CoordinatorTest is Test {
         // TaxProcessor 分红地址已接线
         address processor = FlapTaxTokenV3(token).taxProcessor();
         assertEq(TaxProcessor(processor).dividendAddress(), dividend);
+        // 代币持仓同步合约已接线
+        assertEq(FlapTaxTokenV3(token).dividendContract(), dividend);
         // 四通道配置已透传
         PackedFeeConfig memory cfg = TaxProcessor(processor).feeConfig();
         assertEq(cfg.marketBps, 4000);
@@ -255,6 +257,7 @@ contract CoordinatorTest is Test {
         vm.prank(creator);
         (address token,) = coordinator.createToken{value: 1 ether}(cfg);
         assertEq(coordinator.tokenDividends(token), address(0));
+        assertEq(FlapTaxTokenV3(token).dividendContract(), address(0));
     }
 
     function test_RevertWhen_MaxBuyPerWalletZero() public {

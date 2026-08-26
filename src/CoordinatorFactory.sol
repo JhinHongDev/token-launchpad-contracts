@@ -153,7 +153,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         }
 
         // 步骤3: 初始化 V3 代币（msg.sender=本合约 → 全量代币铸给本合约）
-        IFlapTaxTokenV3(token).initialize(_buildInitParams(tokenConfig, bundle, taxProcessor));
+        IFlapTaxTokenV3(token).initialize(_buildInitParams(tokenConfig, bundle, taxProcessor, dividend));
 
         // 步骤4: 初始化 TaxProcessor（平台不抽成：feeRate=0；四通道 bps 由创建者表单配置）
         ITaxProcessor(taxProcessor)
@@ -265,7 +265,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     function _buildInitParams(
         TokenConfig memory tokenConfig,
         TokenFactory.TokenBundle memory bundle,
-        address taxProcessor
+        address taxProcessor,
+        address dividend
     ) internal view returns (IFlapTaxTokenV3.InitParams memory) {
         address[] memory pools = new address[](1);
         pools[0] = bundle.pair;
@@ -277,7 +278,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
             buyTax: uint16(tokenConfig.feeBuy),
             sellTax: uint16(tokenConfig.feeSell),
             taxProcessor: taxProcessor,
-            dividendContract: address(0),
+            dividendContract: dividend,
             quoteToken: _wbnb(),
             liqExpectedOutputAmount: tokenConfig.liqExpectedOutputAmount,
             taxDuration: tokenConfig.taxDuration,
