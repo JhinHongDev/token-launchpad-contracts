@@ -99,8 +99,11 @@ contract LaunchpadTest is Test {
         assertEq(token.balanceOf(alice), 100 ether);
         assertEq(presale.claimedTokens(alice), 100 ether);
 
-        // 第二个周期再领
+        // 第二个周期再领；视图应报告“下一个”释放边界而非首个周期边界
         vm.warp(block.timestamp + 7 days);
+        (,, uint256 aliceClaimed, uint256 nextVestingTime) = presale.getUserVestingStatus(alice);
+        assertEq(aliceClaimed, 100 ether);
+        assertEq(nextVestingTime, presale.vestingStart() + 3 * 7 days, "next boundary, not first");
         vm.prank(alice);
         presale.claim();
         assertEq(token.balanceOf(alice), 200 ether);

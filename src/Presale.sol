@@ -503,7 +503,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
         claimable = getVestedAmount(user);
         claimed = claimedTokens[user];
         if (vestingStart > 0) {
-            nextVestingTime = vestingStart + vestingDelay;
+            // 当前周期已过 period 个 → 下一次释放边界 = start + (period+1)*delay（非首个周期边界）
+            nextVestingTime = vestingStart + ((block.timestamp - vestingStart) / vestingDelay + 1) * vestingDelay;
         }
     }
 
