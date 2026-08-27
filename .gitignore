@@ -19,6 +19,9 @@ docs/
 .env.*
 !.env.example
 
+# Agent files
+.zcode/
+
 .ref_tmp/
 .vscode/
 .codegraph/

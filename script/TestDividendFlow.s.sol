@@ -74,7 +74,8 @@ contract TestDividendFlow is Script {
                 dividendBps: 10000, // 100% 分红通道
                 lpBps: 0,
                 minHolderBalance: 1000 ether // 最低持仓 1000 DIVTEST
-            })
+            }),
+            bytes32(0) // 默认随机地址路径
         );
 
         PRESALE(payable(presaleAddr)).claimAllTokens();

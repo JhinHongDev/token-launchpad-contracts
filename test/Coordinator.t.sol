@@ -96,7 +96,7 @@ contract CoordinatorTest is Test {
 
         vm.deal(creator, 100 ether);
         vm.prank(creator);
-        coordinator.createToken{value: 1 ether}(_tokenConfig());
+        coordinator.createToken{value: 1 ether}(_tokenConfig(), bytes32(0));
     }
 
     function test_CreateTokenOnlyNoPresaleSetup() public {
@@ -260,7 +260,7 @@ contract CoordinatorTest is Test {
     function test_RefundsExcessCreationFee() public {
         uint256 balanceBefore = creator.balance;
         vm.prank(creator);
-        coordinator.createToken{value: 1 ether}(_tokenConfig());
+        coordinator.createToken{value: 1 ether}(_tokenConfig(), bytes32(0));
         // 仅扣 0.005 创建费，多付全额退还
         assertEq(creator.balance, balanceBefore - 0.005 ether);
     }
@@ -271,7 +271,7 @@ contract CoordinatorTest is Test {
         vm.deal(creator, 1 ether);
         vm.prank(creator);
         vm.expectRevert(InvalidAllocationBps.selector);
-        coordinator.createToken{value: 1 ether}(cfg);
+        coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
     }
 
     function test_RevertWhen_TaxAboveTenPercent() public {
@@ -280,13 +280,13 @@ contract CoordinatorTest is Test {
         vm.deal(creator, 1 ether);
         vm.prank(creator);
         vm.expectRevert(BuyFeeTooHigh.selector);
-        coordinator.createToken{value: 1 ether}(cfg);
+        coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
 
         TokenConfig memory cfg2 = _tokenConfig();
         cfg2.sellTax = 1001;
         vm.prank(creator);
         vm.expectRevert(SellFeeTooHigh.selector);
-        coordinator.createToken{value: 1 ether}(cfg2);
+        coordinator.createToken{value: 1 ether}(cfg2, bytes32(0));
     }
 
     function test_DeploysDividendWhenChannelOn() public {
@@ -318,7 +318,7 @@ contract CoordinatorTest is Test {
         cfg.dividendBps = 0;
         cfg.marketBps = 6000; // 保持合计 10000
         vm.prank(creator);
-        (address token,) = coordinator.createToken{value: 1 ether}(cfg);
+        (address token,) = coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
         assertEq(coordinator.tokenDividends(token), address(0));
         assertEq(FlapTaxTokenV3(token).dividendContract(), address(0));
     }
@@ -327,7 +327,7 @@ contract CoordinatorTest is Test {
         TokenConfig memory cfg = _tokenConfig();
         cfg.antiFarmerDuration = 0; // 支持用户不设防夹期
         vm.prank(creator);
-        (address token,) = coordinator.createToken{value: 1 ether}(cfg);
+        (address token,) = coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
         assertEq(FlapTaxTokenV3(token).antiFarmerDuration(), 0);
     }
 

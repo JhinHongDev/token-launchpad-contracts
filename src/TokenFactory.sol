@@ -64,7 +64,13 @@ contract TokenFactory is AccessControl {
     }
 
     /// @dev 部署克隆 → 创建 V2 交易对。TaxProcessor 由 Coordinator 部署并初始化（其部署者为调用链协调器）。
-    function createToken(TokenConfig memory config) external onlyRole(COORDINATOR_ROLE) returns (TokenBundle memory) {
+    ///      salt == 0 走 CREATE（默认随机地址）；salt != 0 走 CREATE2 确定性地址（付费预留 CA / 五连 8 靓号档位，
+    ///      目标地址已被占用时按 EIP-684 回滚 CloneFailed，天然防重复发币）。
+    function createToken(TokenConfig memory config, bytes32 salt)
+        external
+        onlyRole(COORDINATOR_ROLE)
+        returns (TokenBundle memory)
+    {
         if (config.buyTax > MAX_TAX_BPS) revert BuyFeeTooHigh();
         if (config.sellTax > MAX_TAX_BPS) revert SellFeeTooHigh();
         if (config.feeRecipient == address(0)) revert InvalidFeeRecipient();
@@ -73,12 +79,23 @@ contract TokenFactory is AccessControl {
             revert InvalidAntiFarmerDuration();
         }
 
-        address token = Clones.clone(flapImplementation);
+        address token;
+        if (salt == bytes32(0)) {
+            token = Clones.clone(flapImplementation);
+        } else {
+            token = Clones.cloneDeterministic(flapImplementation, salt);
+        }
 
         IPancakeRouter02 router = IPancakeRouter02(routerAddress);
         address pair = IPancakeFactory(router.factory()).createPair(token, router.WETH());
 
         emit TokenCreated(token, tx.origin, pair, address(0));
         return TokenBundle({token: token, pair: pair});
+    }
+
+    /// @notice 预言 CREATE2 确定性部署地址（与 createToken 非 0 盐路径一一对应），供预留校验与前端搜盐。
+    ///         前端可循环调用本视图完成尾缀搜索；或以本函数结果为基准在本地复刻同一公式提速。
+    function predictTokenAddress(bytes32 salt) external view returns (address predicted) {
+        return Clones.predictDeterministicAddress(flapImplementation, salt, address(this));
     }
 }

@@ -37,6 +37,11 @@ error RefundFailed();
 error InvalidMaxBuyPerWallet();
 error ZeroCreationFee();
 error AlreadyConfigured();
+error InvalidSalt();
+error InsufficientReservationFee();
+error AddressAlreadyReserved();
+error AddressAlreadyDeployed();
+error NotReserver();
 
 /// @notice 平台侧对每代币 Dividend 实例的管理子集（完整接口见 src/lib/dividend/IDividend.sol）
 interface IPlatformDividend {
@@ -60,7 +65,11 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
 
     bool public factoryEnabled = true;
     uint256 public creationFee = 0.005 ether; // 0.005 BNB = 5e15 wei
+    uint256 public reservationFee = 0.01 ether; // 锁定 CA（预留确定性地址）服务费，独立于创建费、不抵扣
     uint256 public totalPairsCreated = 0;
+
+    /// @notice 预测地址 → 预留者（CREATE2 预言地址的占位登记，永久有效，发币后保留作凭证）
+    mapping(address => address) public tokenAddressReserver;
 
     mapping(address => address) public tokenPresales;
     mapping(address => address) public presaleTokens;
@@ -93,7 +102,9 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     );
     event FactoryEnabledSet(bool enabled);
     event CreationFeeSet(uint256 fee);
+    event ReservationFeeSet(uint256 fee);
     event FeesWithdrawn(uint256 amount, address indexed to);
+    event TokenAddressReserved(address indexed token, address indexed reserver, uint256 fee);
     event DividendCreated(address indexed token, address indexed dividend);
     event ExcessRefunded(address indexed to, uint256 amount);
 
@@ -119,7 +130,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     ///      代币全量存入托管仓，token 所有权归创建者；预售为可选步骤（见 setupPresale）。
     ///      - 不开预售：创建者 claimAllTokens() 一次性领取全部代币
     ///      - 开预售： 调用 setupPresale() 配置 30% 创建者 / 20% 底池 / 50% 预售
-    function createToken(TokenConfig memory tokenConfig)
+    ///      - salt == 0：默认随机地址；salt != 0：CREATE2 确定性地址，须为本人预留的预言地址
+    function createToken(TokenConfig memory tokenConfig, bytes32 salt)
         external
         payable
         nonReentrant
@@ -137,7 +149,12 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         ) revert InvalidAllocationBps();
 
         // 步骤1: TokenFactory 部署克隆 + Pair + TaxProcessor
-        TokenFactory.TokenBundle memory bundle = tokenFactory.createToken(tokenConfig);
+        //       salt != 0 时先校验预留权属：预测地址若已被他人锁定则拒绝兑现（本人/未预留放行）
+        if (salt != bytes32(0)) {
+            address reserver = tokenAddressReserver[tokenFactory.predictTokenAddress(salt)];
+            if (reserver != address(0) && reserver != msg.sender) revert NotReserver();
+        }
+        TokenFactory.TokenBundle memory bundle = tokenFactory.createToken(tokenConfig, salt);
         token = bundle.token;
         if (token == address(0)) revert TokenCreationFailed();
 
@@ -301,6 +318,31 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------------
+    // 锁定 CA：发币前付费预留确定性代币地址（前端链下搜盐后调用）
+    // ---------------------------------------------------------------------------
+
+    /// @dev 校验链：工厂可用 → 盐非零 → 费足 → 预言地址尚无代码（未部署）→ 未被他人预留；
+    ///      先登记后退款（CEI + nonReentrant）。预留不过期、不退款；发币经 createToken(config, salt)
+    ///      由 NotReserver 校验兑现权属。盐搜索属前端职责，合约内不存在任何枚举逻辑。
+    ///      工厂禁用 = 停止一切付费服务，预留同步不可用（同 createToken 门槛）。
+    function reserveTokenAddress(bytes32 salt) external payable nonReentrant {
+        if (!factoryEnabled) revert FactoryDisabled();
+        if (salt == bytes32(0)) revert InvalidSalt();
+        if (msg.value < reservationFee) revert InsufficientReservationFee();
+
+        address predicted = tokenFactory.predictTokenAddress(salt);
+        if (predicted.code.length != 0) revert AddressAlreadyDeployed();
+        if (tokenAddressReserver[predicted] != address(0)) revert AddressAlreadyReserved();
+
+        tokenAddressReserver[predicted] = msg.sender;
+        emit TokenAddressReserved(predicted, msg.sender, reservationFee);
+
+        if (msg.value > reservationFee) {
+            TransferHelper.safeTransferETH(msg.sender, msg.value - reservationFee);
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // 管理
     // ---------------------------------------------------------------------------
 
@@ -313,6 +355,13 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         if (_fee == 0) revert ZeroCreationFee();
         creationFee = _fee;
         emit CreationFeeSet(_fee);
+    }
+
+    /// @dev 与创建费同策略：平台费类参数不允许归零（保持防垃圾占位底线）
+    function setReservationFee(uint256 _fee) external onlyAdmin {
+        if (_fee == 0) revert ZeroCreationFee();
+        reservationFee = _fee;
+        emit ReservationFeeSet(_fee);
     }
 
     function withdrawFees() external onlyAdmin {
