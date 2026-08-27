@@ -206,7 +206,7 @@ contract CoordinatorTest is Test {
 
     function test_RevertWhen_AllocationSumWrong() public {
         TokenConfig memory cfg = _tokenConfig();
-        cfg.creatorWalletBps = 5000; // 5000+2000+2000+2000 = 11000 ≠ 10000
+        cfg.marketBps = 5000; // 5000+2000+2000+2000 = 11000 ≠ 10000
         vm.deal(creator, 1 ether);
         vm.prank(creator);
         vm.expectRevert(InvalidAllocationBps.selector);
@@ -215,14 +215,14 @@ contract CoordinatorTest is Test {
 
     function test_RevertWhen_TaxAboveTenPercent() public {
         TokenConfig memory cfg = _tokenConfig();
-        cfg.feeBuy = 1001; // > 10%
+        cfg.buyTax = 1001; // > 10%
         vm.deal(creator, 1 ether);
         vm.prank(creator);
         vm.expectRevert(BuyFeeTooHigh.selector);
         coordinator.createToken{value: 1 ether}(cfg);
 
         TokenConfig memory cfg2 = _tokenConfig();
-        cfg2.feeSell = 1001;
+        cfg2.sellTax = 1001;
         vm.prank(creator);
         vm.expectRevert(SellFeeTooHigh.selector);
         coordinator.createToken{value: 1 ether}(cfg2);
@@ -241,6 +241,8 @@ contract CoordinatorTest is Test {
         assertEq(TaxProcessor(processor).dividendAddress(), dividend);
         // 代币持仓同步合约已接线
         assertEq(FlapTaxTokenV3(token).dividendContract(), dividend);
+        // meta 元数据已透传
+        assertEq(FlapTaxTokenV3(token).metaURI(), "ipfs://QmTestMeta");
         // 四通道配置已透传
         PackedFeeConfig memory cfg = TaxProcessor(processor).feeConfig();
         assertEq(cfg.marketBps, 4000);
@@ -253,11 +255,19 @@ contract CoordinatorTest is Test {
     function test_NoDividendWhenZeroBps() public {
         TokenConfig memory cfg = _tokenConfig();
         cfg.dividendBps = 0;
-        cfg.creatorWalletBps = 6000; // 保持合计 10000
+        cfg.marketBps = 6000; // 保持合计 10000
         vm.prank(creator);
         (address token,) = coordinator.createToken{value: 1 ether}(cfg);
         assertEq(coordinator.tokenDividends(token), address(0));
         assertEq(FlapTaxTokenV3(token).dividendContract(), address(0));
+    }
+
+    function test_ZeroAntiFarmerDurationAllowed() public {
+        TokenConfig memory cfg = _tokenConfig();
+        cfg.antiFarmerDuration = 0; // 支持用户不设防夹期
+        vm.prank(creator);
+        (address token,) = coordinator.createToken{value: 1 ether}(cfg);
+        assertEq(FlapTaxTokenV3(token).antiFarmerDuration(), 0);
     }
 
     function test_RevertWhen_MaxBuyPerWalletZero() public {
@@ -287,17 +297,18 @@ contract CoordinatorTest is Test {
         return TokenConfig({
             name: "TeamToken",
             symbol: "TT",
-            feeBuy: 300,
-            feeSell: 500,
+            meta: "ipfs://QmTestMeta",
+            buyTax: 300,
+            sellTax: 500,
             feeRecipient: feeReceiver,
-            marketReceiver: address(0x9999),
+            marketAddress: address(0x9999),
             taxDuration: 7 days,
             antiFarmerDuration: 1 days,
             liqExpectedOutputAmount: 0,
-            creatorWalletBps: 4000, // 创作者钱包 40%
-            burnBps: 2000, // 销毁 20%
+            marketBps: 4000, // 创作者/营销 40%
+            deflationBps: 2000, // 销毁 20%
             dividendBps: 2000, // 分红 20%
-            liquidityBps: 2000, // 流动性 20%
+            lpBps: 2000, // 流动性 20%
             minHolderBalance: 0
         });
     }

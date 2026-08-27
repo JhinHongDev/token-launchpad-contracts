@@ -23,18 +23,19 @@ error InvalidAntiFarmerDuration();
 struct TokenConfig {
     string name;
     string symbol;
-    uint256 feeBuy; // 买税 bps（上限 MAX_TAX_BPS = 10%）
-    uint256 feeSell; // 卖税 bps（上限 MAX_TAX_BPS = 10%）
+    string meta; // 代币描述/元数据 IPFS CID（对齐 IFlapTaxTokenV3.InitParams.meta）
+    uint16 buyTax; // 买税 bps（上限 MAX_TAX_BPS = 1000 即 10%）
+    uint16 sellTax; // 卖税 bps（上限 MAX_TAX_BPS = 1000 即 10%）
     address feeRecipient; // 兜底接收（TaxProcessor feeReceiver：swap 失败兜底 / 无分红实例时的分红兜底）
-    address marketReceiver; // 创作者资金钱包（marketing 通道接收方）
+    address marketAddress; // 创作者/营销资金钱包（marketing 通道接收方）
     uint256 taxDuration; // 税持续时间（秒）
-    uint256 antiFarmerDuration; // 防farm税持续时间（秒，<= taxDuration）
+    uint256 antiFarmerDuration; // 防 farm 税持续时间（秒，<= taxDuration，支持 0）
     uint256 liqExpectedOutputAmount; // 清算参考输出（BNB wei，0 = 关闭方向调节）
     // ── 税收四通道分配（bps，合计必须 = 10000，平台不抽成）──
-    uint16 creatorWalletBps; // 创作者资金钱包通道
-    uint16 burnBps; // 销毁通道（减少供应量）
+    uint16 marketBps; // 创作者/营销资金钱包通道
+    uint16 deflationBps; // 销毁通道（减少供应量）
     uint16 dividendBps; // 分红通道（持有者奖励）
-    uint16 liquidityBps; // 流动性通道（增加流动性）
+    uint16 lpBps; // 流动性通道（增加流动性）
     uint256 minHolderBalance; // 分红资格最低持仓（代币 wei，0 = 不设门槛）
 }
 
@@ -64,11 +65,11 @@ contract TokenFactory is AccessControl {
 
     /// @dev 部署克隆 → 创建 V2 交易对。TaxProcessor 由 Coordinator 部署并初始化（其部署者为调用链协调器）。
     function createToken(TokenConfig memory config) external onlyRole(COORDINATOR_ROLE) returns (TokenBundle memory) {
-        if (config.feeBuy > MAX_TAX_BPS) revert BuyFeeTooHigh();
-        if (config.feeSell > MAX_TAX_BPS) revert SellFeeTooHigh();
+        if (config.buyTax > MAX_TAX_BPS) revert BuyFeeTooHigh();
+        if (config.sellTax > MAX_TAX_BPS) revert SellFeeTooHigh();
         if (config.feeRecipient == address(0)) revert InvalidFeeRecipient();
         if (config.taxDuration == 0) revert InvalidTaxDuration();
-        if (config.antiFarmerDuration == 0 || config.antiFarmerDuration > config.taxDuration) {
+        if (config.antiFarmerDuration > config.taxDuration) {
             revert InvalidAntiFarmerDuration();
         }
 

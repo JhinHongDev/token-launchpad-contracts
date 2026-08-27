@@ -129,8 +129,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
 
         // 四通道分配校验：合计必须恰好 10000（各项为 uint16 非负，合计约束即隐含单项 ≤ 100%）
         if (
-            uint256(tokenConfig.creatorWalletBps) + tokenConfig.burnBps + tokenConfig.dividendBps
-                    + tokenConfig.liquidityBps != 10000
+            uint256(tokenConfig.marketBps) + tokenConfig.deflationBps + tokenConfig.dividendBps
+                    + tokenConfig.lpBps != 10000
         ) revert InvalidAllocationBps();
 
         // 步骤1: TokenFactory 部署克隆 + Pair + TaxProcessor
@@ -162,13 +162,13 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
                 quoteToken: _wbnb(),
                 router: routerAddress,
                 feeReceiver: tokenConfig.feeRecipient,
-                marketAddress: tokenConfig.marketReceiver,
+                marketAddress: tokenConfig.marketAddress,
                 dividendAddress: dividend,
                 taxToken: token,
                 feeRate: 0, // 平台不抽成，四通道合计 100%
-                marketBps: tokenConfig.creatorWalletBps,
-                deflationBps: tokenConfig.burnBps,
-                lpBps: tokenConfig.liquidityBps,
+                marketBps: tokenConfig.marketBps,
+                deflationBps: tokenConfig.deflationBps,
+                lpBps: tokenConfig.lpBps,
                 dividendBps: tokenConfig.dividendBps,
                 dividendToken: address(0),
                 commissionReceiver: address(0),
@@ -274,9 +274,9 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         return IFlapTaxTokenV3.InitParams({
             name: tokenConfig.name,
             symbol: tokenConfig.symbol,
-            meta: "",
-            buyTax: uint16(tokenConfig.feeBuy),
-            sellTax: uint16(tokenConfig.feeSell),
+            meta: tokenConfig.meta,
+            buyTax: tokenConfig.buyTax,
+            sellTax: tokenConfig.sellTax,
             taxProcessor: taxProcessor,
             dividendContract: dividend,
             quoteToken: _wbnb(),

@@ -2,8 +2,18 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+optimizer = true
+optimizer_runs = 200
+
+fs_permissions = [{ access = "read-write", path = "./script/deployments" }]
 
 [fmt]
 ignore = ["lib/**/*.sol", "src/lib/**/*.sol"]
+
+[rpc_endpoints]
+bsc-testnet = "https://bsc-testnet-rpc.publicnode.com"
+
+[etherscan]
+bsc-testnet = { key = "${BSCSCAN_API_KEY}", chain = 97, url = "https://api.etherscan.io/v2/api?chainid=97" }
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
