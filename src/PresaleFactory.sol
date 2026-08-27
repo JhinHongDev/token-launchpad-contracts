@@ -19,6 +19,7 @@ struct PresaleConfig {
     uint256 maxBuyPerWallet;
     uint256 hardcap;
     uint256 minLiquidityAmount;
+    uint256 softCap; // 认购成功线：必须 ≥ minLiquidityAmount，否则 endPresale 判失败开放退款
     uint256 startTime;
     uint256 vestingDelay;
     uint256 vestingRate;

@@ -36,6 +36,7 @@ error DividendNotDeployed();
 error RefundFailed();
 error InvalidMaxBuyPerWallet();
 error ZeroCreationFee();
+error AlreadyConfigured();
 
 /// @notice 平台侧对每代币 Dividend 实例的管理子集（完整接口见 src/lib/dividend/IDividend.sol）
 interface IPlatformDividend {
@@ -64,6 +65,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     mapping(address => address) public tokenPresales;
     mapping(address => address) public presaleTokens;
     mapping(address => address) public tokenCreators;
+    /// @notice 代币 → 预售条款是否已配置：每仓仅允许一次 setupPresale（开售后底层条款冻结）
+    mapping(address => bool) public tokenConfigured;
     /// @notice 代币 → Dividend 实例（仅当分红通道 bps > 0 时部署）
     mapping(address => address) public tokenDividends;
     mapping(address => address[]) public creatorTokens;
@@ -232,7 +235,10 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         address presale = tokenPresales[token];
         if (presale == address(0)) revert TokenNotRegistered();
         if (tokenCreators[token] != msg.sender) revert NotTokenCreator();
+        if (tokenConfigured[token]) revert AlreadyConfigured(); // 条款一次性配置，与底层状态 0 冻结一致
         if (presaleConfig.presaleTokenPrice == 0) revert InvalidPrice();
+
+        tokenConfigured[token] = true;
 
         // 固定份额规则：30% 创建者 / 20% 底池 / 50% 预售（基于代币总供应量）
         uint256 supply = IERC20(token).balanceOf(presale);
@@ -253,6 +259,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         );
         // vesting 恒开启（产品规则），仅节奏可配
         p.setVestingConfig(presaleConfig.vestingDelay, presaleConfig.vestingRate);
+        // 认购成功线（≥ minLiquidityAmount 由 PRESALE 校验）：endPresale 时未达则判发行失败开放退款
+        p.setSoftCap(presaleConfig.softCap);
         if (presaleConfig.slippage > 0) {
             p.setSlippageProtection(presaleConfig.slippage);
         }

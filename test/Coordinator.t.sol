@@ -5,12 +5,13 @@ pragma solidity ^0.8.13;
 import {Test} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
-import {PRESALE, PresaleSoldOut} from "src/Presale.sol";
+import {PRESALE, PresaleSoldOut, NothingToClaim, InvalidStatus} from "src/Presale.sol";
 import {
     CoordinatorFactory,
     NotTokenCreator,
     InvalidAllocationBps,
-    InvalidMaxBuyPerWallet
+    InvalidMaxBuyPerWallet,
+    AlreadyConfigured
 } from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig, BuyFeeTooHigh, SellFeeTooHigh} from "src/TokenFactory.sol";
 import {TaxProcessor} from "src/TaxProcessor.sol";
@@ -61,6 +62,9 @@ interface IERC20Lite {
 
 contract CoordinatorTest is Test {
     uint256 constant SUPPLY = 1e9 ether;
+
+    // 结构性镜像合约事件，供 vm.expectEmit 按 topic 匹配
+    event PresaleFailed(uint256 raisedBNB, uint256 softCap);
 
     FlapTaxTokenV3 flapImpl;
     MockRouterWithFactory router;
@@ -192,6 +196,63 @@ contract CoordinatorTest is Test {
         coordinator.setupPresale(token, _presaleConfig()); // 非创建者调用
     }
 
+    function test_RevertWhen_DuplicateSetupPresale() public {
+        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
+        PresaleConfig memory cfg = _presaleConfig();
+
+        vm.prank(creator);
+        coordinator.setupPresale(token, cfg);
+
+        vm.prank(creator);
+        vm.expectRevert(AlreadyConfigured.selector);
+        coordinator.setupPresale(token, cfg); // 条款一次性配置
+    }
+
+    /// @notice 失败发行闭环：未达软顶收官 → 散户精确退款 → 创建者回收代币
+    function test_FailedSale_RefundAndReclaimClosedLoop() public {
+        address tok = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
+        address sale = coordinator.getTokenPresale(tok);
+
+        PresaleConfig memory cfg = _presaleConfig();
+        cfg.softCap = 5 ether; // 高于常规募集量，制造失败场景
+
+        vm.startPrank(creator);
+        coordinator.setupPresale(tok, cfg);
+        PRESALE(payable(sale)).openPresale();
+        vm.stopPrank();
+
+        address alice = address(0x1234);
+        vm.deal(alice, 10 ether);
+        vm.prank(alice);
+        PRESALE(payable(sale)).subscribe{value: 1 ether}();
+
+        vm.expectEmit(false, false, false, true, sale);
+        emit PresaleFailed(1 ether, 5 ether);
+        vm.prank(creator);
+        PRESALE(payable(sale)).endPresale();
+        assertEq(PRESALE(payable(sale)).presaleStatus(), PRESALE(payable(sale)).STATUS_FAILED());
+
+        // 失败态封锁开盘
+        vm.prank(creator);
+        vm.expectRevert(InvalidStatus.selector);
+        PRESALE(payable(sale)).launch();
+
+        // 散户精确退款、幂等防重领
+        uint256 before = alice.balance;
+        vm.prank(alice);
+        PRESALE(payable(sale)).refund();
+        assertEq(alice.balance, before + 1 ether);
+        vm.prank(alice);
+        vm.expectRevert(NothingToClaim.selector);
+        PRESALE(payable(sale)).refund();
+
+        // 创建者回收托管代币（散户从未取得过代币）
+        vm.prank(creator);
+        PRESALE(payable(sale)).reclaimTokens();
+        assertEq(IERC20Lite(tok).balanceOf(sale), 0);
+        assertEq(IERC20Lite(tok).balanceOf(creator), SUPPLY);
+    }
+
     // ---------------------------------------------------------------------------
     // 新增：四通道 / 退款 / 税率上限 / Dividend 部署 / maxBuy 校验
     // ---------------------------------------------------------------------------
@@ -319,6 +380,7 @@ contract CoordinatorTest is Test {
             maxBuyPerWallet: 1e8 ether,
             hardcap: 0,
             minLiquidityAmount: 0.1 ether,
+            softCap: 0.5 ether, // 常规路径募集 1 BNB > 软顶；失败路径用例会单独抬高
             startTime: 0,
             vestingDelay: 7 days,
             vestingRate: 10,
