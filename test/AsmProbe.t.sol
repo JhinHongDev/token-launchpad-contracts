@@ -14,12 +14,7 @@ contract ProbeTarget {
 library LibProbe {
     function probe(address impl, bytes32 salt)
         external
-        returns (
-            address ourActual,
-            address ourPredicted,
-            address ozActual,
-            address ozPredicted
-        )
+        returns (address ourActual, address ourPredicted, address ozActual, address ozPredicted)
     {
         ourActual = OurClones.cloneDeterministic(impl, salt);
         ourPredicted = OurClones.predictDeterministicAddress(impl, salt, address(this));
@@ -33,8 +28,7 @@ contract AsmProbeTest is Test {
     /// @dev 四方对照：我方库 create2 实际落位 == 我方预言；OZ 路径自洽且与我方语义一致
     function test_Probe() public {
         ProbeTarget t = new ProbeTarget();
-        (address oA, address oP, address zA, address zP) =
-            LibProbe.probe(address(t), keccak256("probe"));
+        (address oA, address oP, address zA, address zP) = LibProbe.probe(address(t), keccak256("probe"));
         emit log_named_address("ourActual   ", oA);
         emit log_named_address("ourPredicted", oP);
         emit log_named_address("ozActual    ", zA);

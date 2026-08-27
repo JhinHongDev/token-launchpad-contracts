@@ -144,8 +144,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
 
         // 四通道分配校验：合计必须恰好 10000（各项为 uint16 非负，合计约束即隐含单项 ≤ 100%）
         if (
-            uint256(tokenConfig.marketBps) + tokenConfig.deflationBps + tokenConfig.dividendBps
-                    + tokenConfig.lpBps != 10000
+            uint256(tokenConfig.marketBps) + tokenConfig.deflationBps + tokenConfig.dividendBps + tokenConfig.lpBps
+                != 10000
         ) revert InvalidAllocationBps();
 
         // 步骤1: TokenFactory 部署克隆 + Pair + TaxProcessor
@@ -364,6 +364,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         emit ReservationFeeSet(_fee);
     }
 
+    // slither-disable-next-line arbitrary-send-eth 仅 admin 可提，收款方 = 调用者本人，非任意目的地
     function withdrawFees() external onlyAdmin {
         uint256 balance = address(this).balance;
         if (balance == 0) revert NoFeesToWithdraw();

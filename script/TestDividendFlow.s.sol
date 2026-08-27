@@ -84,14 +84,7 @@ contract TestDividendFlow is Script {
 
         // 创建者加池 5 亿代币 + 0.001 BNB
         token.approve(ROUTER_ADDR, 500_000_000 ether);
-        router.addLiquidityETH{value: 0.001 ether}(
-            tokenAddr,
-            500_000_000 ether,
-            0,
-            0,
-            creator,
-            block.timestamp + 300
-        );
+        router.addLiquidityETH{value: 0.001 ether}(tokenAddr, 500_000_000 ether, 0, 0, creator, block.timestamp + 300);
         token.finalizeMigration();
 
         // 转账 50,000,000 代币给散户
@@ -128,21 +121,15 @@ contract TestDividendFlow is Script {
         path[1] = wbnb;
 
         router.swapExactTokensForETHSupportingFeeOnTransferTokens{gas: 800000}(
-            250_000_000 ether,
-            0,
-            path,
-            creator,
-            block.timestamp + 300
+            250_000_000 ether, 0, path, creator, block.timestamp + 300
         );
-        console2.log(unicode"第一笔交易完成，代币合约已扣税存入:", token.balanceOf(tokenAddr) / 1e18, "DIVTEST");
+        console2.log(
+            unicode"第一笔交易完成，代币合约已扣税存入:", token.balanceOf(tokenAddr) / 1e18, "DIVTEST"
+        );
 
         // 交易 2: 卖出 100 万代币，由于上笔已积攒 1250 万（>= 1000 万清算阈值），此笔交易自动触发清算 swap 成 WBNB！
         router.swapExactTokensForETHSupportingFeeOnTransferTokens{gas: 800000}(
-            1_000_000 ether,
-            0,
-            path,
-            creator,
-            block.timestamp + 300
+            1_000_000 ether, 0, path, creator, block.timestamp + 300
         );
 
         uint256 pendingWBNB = processor.pendingDividendQuoteTokenBalance();

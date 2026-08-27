@@ -69,8 +69,7 @@ contract TokenReservationTest is Test {
     uint256 constant SUPPLY = 1e9 ether;
     // 低 20 bit == 最后五个十六进制位；0x88888 即五连 8
     uint160 constant VANITY_88888 = 0x88888;
-    bytes32 constant RESERVE_TOPIC =
-        keccak256("TokenAddressReserved(address,address,uint256)");
+    bytes32 constant RESERVE_TOPIC = keccak256("TokenAddressReserved(address,address,uint256)");
 
     MockRouterWithFactory router;
     MockPairFactory pairFactory;
@@ -95,8 +94,9 @@ contract TokenReservationTest is Test {
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));
         PRESALE presaleTemplate = new PRESALE();
         presaleFactory = new PresaleFactory(address(presaleTemplate), address(0));
-        coordinator =
-            new CoordinatorFactory(address(tokenFactory), address(presaleFactory), address(router), address(dividendImpl));
+        coordinator = new CoordinatorFactory(
+            address(tokenFactory), address(presaleFactory), address(router), address(dividendImpl)
+        );
 
         tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(coordinator));
         presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(coordinator));
@@ -134,7 +134,8 @@ contract TokenReservationTest is Test {
     function test_Predict_FormulaParityAcrossThreePaths() public {
         bytes32 s = keccak256("formula-check");
         address viaView = tokenFactory.predictTokenAddress(s);
-        address viaLibDirect = Clones.predictDeterministicAddress(tokenFactory.flapImplementation(), s, address(tokenFactory));
+        address viaLibDirect =
+            Clones.predictDeterministicAddress(tokenFactory.flapImplementation(), s, address(tokenFactory));
         address viaManualHex = _predictHexFormula(s, address(tokenFactory));
         console2.log("viaView      :", viaView);
         console2.log("viaLibDirect :", viaLibDirect);
@@ -315,8 +316,7 @@ contract TokenReservationTest is Test {
         vm.prank(bob);
         coordinator.createToken{value: cFee}(_tokenConfig(), open);
         assertEq(
-            coordinator.getTokenPresalePairsByCreator(bob, 0, 1)[0].tokenAddress,
-            tokenFactory.predictTokenAddress(open)
+            coordinator.getTokenPresalePairsByCreator(bob, 0, 1)[0].tokenAddress, tokenFactory.predictTokenAddress(open)
         );
     }
 
@@ -394,7 +394,9 @@ contract TokenReservationTest is Test {
         vm.prank(alice);
         vm.expectRevert(FactoryDisabled.selector);
         coordinator.reserveTokenAddress{value: rFee}(s);
-        assertEq(coordinator.tokenAddressReserver(tokenFactory.predictTokenAddress(s)), address(0), "no state side-effect");
+        assertEq(
+            coordinator.tokenAddressReserver(tokenFactory.predictTokenAddress(s)), address(0), "no state side-effect"
+        );
 
         coordinator.setFactoryEnabled(true);
         vm.prank(alice);
