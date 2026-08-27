@@ -190,6 +190,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
         uint256 _poolShare,
         uint256 _presaleShare
     ) external onlyOwnerOrConfigurator onlyConfigPhase {
+        if (tokensClaimed) revert TokensAlreadyClaimed(); // 抽干托管仓后禁止重开预售，封死“领完全量代币再设局募资”骗局
         if (_presaleEnabled) {
             if (_creator == address(0)) revert InvalidCreator();
             if (_creatorShare + _poolShare + _presaleShare == 0) revert EmptyAllocation();
@@ -259,6 +260,9 @@ contract PRESALE is Ownable, ReentrancyGuard {
     function openPresale() external onlyOwner {
         if (!presaleEnabled) revert PresaleDisabled();
         if (presaleStatus != 0) revert InvalidStatus();
+        // 终检（条款冻结前最后一道闸）：任何配置路径下 softCap < minLiquidityAmount 都不可开盘，
+        // 否则 status 2 死角（launch 的 InsufficientBNB 永不可满足，而 refund 仅 FAILED 态开放）
+        if (softCap < minLiquidityAmount) revert SoftCapTooLow();
         presaleStatus = 1;
         emit PresaleOpened();
     }
