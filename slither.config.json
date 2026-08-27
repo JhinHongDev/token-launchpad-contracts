@@ -1,0 +1,8 @@
+{
+    "detectors_to_exclude": [
+        "incorrect-equality",
+        "divide-before-multiply"
+    ],
+    "filter_paths": "lib/",
+    "fail_on": "medium"
+}

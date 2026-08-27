@@ -302,6 +302,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
     // ---------------------------------------------------------------------------
 
     /// @dev 前提：合约是 token 的 owner（由 Coordinator 在创建时移交）
+    // slither-disable-next-line reentrancy-eth nonReentrant 守卫 + 状态写在最后，外部调用为可信路由器
     function launch() external onlyOwner nonReentrant {
         if (!presaleEnabled) revert PresaleDisabled();
         if (presaleStatus != 2) revert InvalidStatus();
@@ -333,6 +334,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
         emit LaunchFinalized(accumulatedBNB, poolShare, block.timestamp);
     }
 
+    // 仅被 launch()（nonReentrant）调用，无独立入口，无重入面
+    // slither-disable-next-line reentrancy-eth
     function _addLiquidity(uint256 tokenAmount, uint256 bnbAmount) internal {
         if (liquidityAdded) revert LiquidityAlreadyAdded();
 

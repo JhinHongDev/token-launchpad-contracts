@@ -144,6 +144,9 @@ contract TaxProcessor is ITaxProcessor {
     ///     > 0 → swap 输出低于参考（价格弱，提高阈值）
     ///     < 0 → swap 输出高于参考（价格强，降低阈值）
     ///     0   → 无参考值或相等
+    // 无递归路径：重入需经代币 _liquidateTax（仅 to==mainPool 且代币自持余额>0 时触发），
+    // 而 processTaxTokens 开头已拉空代币余额；调用方受限 onlyTaxToken/address(this)
+    // slither-disable-next-line reentrancy-no-eth
     function processTaxTokens(uint256 taxAmount) external override onlyTaxToken returns (int8) {
         if (taxAmount == 0) return 0;
 
@@ -204,6 +207,7 @@ contract TaxProcessor is ITaxProcessor {
         }
 
         // 方向信号（弱化异常场景：swap 失败时 out==0，返回 +1 让其回升阈值→更少清算）
+        // slither-disable-next-line uninitialized-local 默认 0 是文档化语义（无参考值/相等 → 0），非未初始化误用
         int8 direction;
         if (liqExpectedOutputAmount != 0) {
             if (out > liqExpectedOutputAmount) direction = -1;
