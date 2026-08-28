@@ -372,7 +372,7 @@ contract TaxProcessor is ITaxProcessor {
     }
 
     /// @notice dividend token 侧余额（本实现不单独持有 dividend token，恒 0）
-    function dividendTokenBalance() external view override returns (uint256) {
+    function dividendTokenBalance() external pure override returns (uint256) {
         return 0;
     }
 
