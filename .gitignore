@@ -21,6 +21,7 @@ docs/
 
 # Agent files
 .zcode/
+.workbuddy/
 
 .ref_tmp/
 .vscode/
