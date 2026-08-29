@@ -19,8 +19,12 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      # 版本钉定：forge fmt 规则跨版本不兼容（如结构体字面量缩进、文件末尾 interface 缩进），
+      # 必须与本地开发版本一致，否则 fmt --check 结果不可复现
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
 
       - name: Show Forge version
         run: forge --version
@@ -47,6 +51,8 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
 
       - name: Install Slither
         run: pipx install slither-analyzer
@@ -77,6 +83,8 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
 
       - name: Run invariant campaign
         run: forge test --match-contract LaunchpadInvariants --invariant-runs 1000 --invariant-depth 2000 -vvv

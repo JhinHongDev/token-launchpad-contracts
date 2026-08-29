@@ -25,8 +25,7 @@ contract Deploy is Script {
         PRESALE presaleTemplate = new PRESALE();
         PresaleFactory presaleFactory = new PresaleFactory(address(presaleTemplate), address(0));
 
-        CoordinatorFactory coordinator =
-            new CoordinatorFactory(address(tokenFactory), address(presaleFactory), ROUTER);
+        CoordinatorFactory coordinator = new CoordinatorFactory(address(tokenFactory), address(presaleFactory), ROUTER);
 
         tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(coordinator));
         presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(coordinator));

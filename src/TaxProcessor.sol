@@ -164,8 +164,7 @@ contract TaxProcessor is ITaxProcessor {
         try IPancakeRouter02(router)
             .swapExactTokensForTokensSupportingFeeOnTransferTokens(
                 amountIn, 0, path, address(this), block.timestamp + DEADLINE_BUFFER
-            )
-        {}
+            ) {}
         catch {
             TransferHelper.safeTransfer(taxToken, feeReceiver, amountIn); // 兑换失败兜底，不锁定资金
             emit FeeForwardedToReceiver(taxToken, amountIn, feeReceiver);
@@ -300,14 +299,7 @@ contract TaxProcessor is ITaxProcessor {
     }
 
     function feeConfig() external view override returns (PackedFeeConfig memory) {
-        return PackedFeeConfig({
-            marketBps: 0,
-            deflationBps: 0,
-            lpBps: 0,
-            dividendBps: 0,
-            feeRate: 0,
-            isWeth: isWeth()
-        });
+        return PackedFeeConfig({marketBps: 0, deflationBps: 0, lpBps: 0, dividendBps: 0, feeRate: 0, isWeth: isWeth()});
     }
 
     function feeConfigV2() external view override returns (PackedFeeConfigV2 memory) {
@@ -324,8 +316,8 @@ contract TaxProcessor is ITaxProcessor {
     }
 }
 
-/// @notice 最小 WETH 接口（解包/包装原生 BNB）
-interface IWETH {
-    function deposit() external payable;
-    function withdraw(uint256 amount) external;
-}
+    /// @notice 最小 WETH 接口（解包/包装原生 BNB）
+    interface IWETH {
+        function deposit() external payable;
+        function withdraw(uint256 amount) external;
+    }

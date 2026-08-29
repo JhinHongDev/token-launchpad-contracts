@@ -6,7 +6,12 @@ import {Test} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
 import {PRESALE, PresaleSoldOut, NothingToClaim, InvalidStatus} from "src/Presale.sol";
-import {CoordinatorFactory, NotTokenCreator, InvalidMaxBuyPerWallet, AlreadyConfigured} from "src/CoordinatorFactory.sol";
+import {
+    CoordinatorFactory,
+    NotTokenCreator,
+    InvalidMaxBuyPerWallet,
+    AlreadyConfigured
+} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig, BuyFeeTooHigh, SellFeeTooHigh} from "src/TokenFactory.sol";
 import {TaxProcessor} from "src/TaxProcessor.sol";
 import {PackedFeeConfig} from "src/lib/interfaces/ITaxProcessor.sol";
