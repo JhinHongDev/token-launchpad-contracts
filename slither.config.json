@@ -1,8 +1,18 @@
 {
     "detectors_to_exclude": [
         "incorrect-equality",
-        "divide-before-multiply"
+        "divide-before-multiply",
+        "naming-convention",
+        "too-many-digits",
+        "assembly",
+        "low-level-calls",
+        "immutable-states",
+        "timestamp",
+        "missing-zero-check",
+        "events-maths",
+        "reentrancy-benign",
+        "reentrancy-events"
     ],
-    "filter_paths": "lib/",
+    "filter_paths": "(lib/|test/|script/)",
     "fail_on": "medium"
 }

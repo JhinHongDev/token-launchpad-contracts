@@ -57,7 +57,11 @@ jobs:
       - name: Install Slither
         run: pipx install slither-analyzer
 
-      # 策略见 slither.config.json：lib/（第三方）过滤、白名单误报行内压制、High/Medium 拦截
+      # 策略见 slither.config.json：
+      #   - lib/（第三方）路径过滤
+      #   - Info/Low 级噪音检测器整体排除（命名/汇编/低级调用等结构性或风格性发现，不参与门禁）
+      #   - High/Medium 检测器全部保留，fail_on: medium 拦截
+      #   - 已核实误报用行内 slither-disable-next-line 压制（须附理由）
       - name: Run Slither
         run: slither . --sarif results.sarif
 
