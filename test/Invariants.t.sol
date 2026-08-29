@@ -8,7 +8,6 @@ import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PRESALE} from "src/Presale.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
-import {Dividend} from "src/lib/dividend/Dividend.sol";
 import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
 
 uint256 constant SUPPLY = 1e9 ether; // FlapTaxTokenV3 固定总量
@@ -243,15 +242,9 @@ contract Handler {
             buyTax: 300,
             sellTax: 500,
             feeRecipient: address(0xfee1),
-            marketAddress: address(0x9999),
             taxDuration: 7 days,
             antiFarmerDuration: 1 days,
-            liqExpectedOutputAmount: 0,
-            marketBps: 4000,
-            deflationBps: 2000,
-            dividendBps: 2000,
-            lpBps: 2000,
-            minHolderBalance: 0
+            liqExpectedOutputAmount: 0
         });
     }
 }
@@ -265,13 +258,10 @@ contract LaunchpadInvariants is Test {
         FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         MockRouterWithFactory router = new MockRouterWithFactory(address(0xAABB), pairFactory);
-        Dividend dividendImpl = new Dividend(address(0xAABB), address(0xdead));
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));
         PRESALE presaleTemplate = new PRESALE();
         PresaleFactory presaleFactory = new PresaleFactory(address(presaleTemplate), address(0));
-        coordinator = new CoordinatorFactory(
-            address(tokenFactory), address(presaleFactory), address(router), address(dividendImpl)
-        );
+        coordinator = new CoordinatorFactory(address(tokenFactory), address(presaleFactory), address(router));
 
         tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(coordinator));
         presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(coordinator));

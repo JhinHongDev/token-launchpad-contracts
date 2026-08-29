@@ -3,6 +3,6 @@
         "incorrect-equality",
         "divide-before-multiply"
     ],
-    "filter_paths": "lib/",
+    "filter_paths": "(lib/|test/|script/)",
     "fail_on": "medium"
 }

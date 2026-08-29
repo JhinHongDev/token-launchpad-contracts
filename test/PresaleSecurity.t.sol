@@ -6,7 +6,6 @@ import {CoordinatorFactory, PresaleConfig} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PRESALE, PresaleNotOpen, PresaleDisabled, TokensAlreadyClaimed, SoftCapTooLow} from "src/Presale.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
-import {Dividend} from "src/lib/dividend/Dividend.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
 
@@ -30,12 +29,9 @@ contract PresaleSecurityTest is Test {
         FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
-        Dividend dividendImpl = new Dividend(address(0xAABB), address(0xdead));
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));
         PresaleFactory presaleFactory = new PresaleFactory(address(new PRESALE()), address(0));
-        coordinator = new CoordinatorFactory(
-            address(tokenFactory), address(presaleFactory), address(router), address(dividendImpl)
-        );
+        coordinator = new CoordinatorFactory(address(tokenFactory), address(presaleFactory), address(router));
         tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(coordinator));
         presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(coordinator));
 
@@ -119,15 +115,9 @@ contract PresaleSecurityTest is Test {
             buyTax: 300,
             sellTax: 500,
             feeRecipient: address(0xfee1),
-            marketAddress: address(0x9999),
             taxDuration: 7 days,
             antiFarmerDuration: 1 days,
-            liqExpectedOutputAmount: 0,
-            marketBps: 4000,
-            deflationBps: 2000,
-            dividendBps: 2000,
-            lpBps: 2000,
-            minHolderBalance: 0
+            liqExpectedOutputAmount: 0
         });
     }
 }

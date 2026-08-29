@@ -21,26 +21,21 @@ error NotDeployer();
 error TaxTokenRequired();
 error RouterRequired();
 error FeeReceiverRequired();
-error InvalidBps();
 error NotTaxToken();
 
-/// @notice Launchpad 最小化 TaxProcessor：税代币 → 四通道拆分（创作者钱包/销毁/分红/流动性）
-///         → swap 成 quote token(WBNB) → 分账累计，由 dispatch() 统一派发。
-/// @dev 与 flap.sh 上游 TaxProcessorBase._processFeeToken/_processTokenDistribution 对齐的简化实现：
-///      1. 平台不抽成（feeRate 由 Coordinator 固定传 0），四通道 bps 合计必须 = 10000
-///      2. 销毁通道直转 0xdead
-///      3. 流动性通道采用上游"整份额滚动"：本期 lp 份额优先配对累计 lpQuoteBalance 加池
-///         （LP 死锁 0xdead），剩余 lp 代币随其他通道 swap，其 quote 收益按比例回填
-///         lpQuoteBalance 供下期配对（自循环，无需额外资金来源）
-///      4. 分红通道在 dispatch 时 approve + IDividend.deposit()；失败则保留余额下期重试
-///      5. fee/market 派发保持 WBNB ERC20 转账（有意偏离上游的原生 BNB 模式：
-///         上游依赖 _reconcileBalance 兜底失败转账的 ETH 残留，本最小化实现不引入该复杂度；
-///         分红侧持有者最终经 Dividend.withdrawDividends 收到原生 BNB，产品体验不变）
-///      V3 扩展位（dividendToken/converter/commission/swapRegistry）全部禁用。
+/// @notice Launchpad 极简 TaxProcessor：税代币 → swap 成 quote(WBNB) → unwrap 原生 BNB
+///         → 即时转给发币时固定的唯一收款人（feeReceiver）。
+/// @dev 单通道模型，清算即派发（无 dispatch 派发、无分账累计、无 keeper 依赖）：
+///      1. 收款人由 Coordinator 在发币时经 initialize 固定，运行期无任何变更入口
+///         （清算时动态传收款人=任何人可把税金打给自己，故恒为固定值）
+///      2. 失败路径落点唯一：swap 失败 → 税代币直转 feeReceiver；
+///         原生转账失败（收款人为拒收 BNB 的合约）→ 包回 WBNB 走 ERC20 转账，资金不锁死
+///      3. 方向信号（swap 输出 vs liqExpectedOutputAmount）原样回传，
+///         供代币 _adjustLiquidationThreshold 动态调节清算阈值
+///      4. 上游四通道（market/deflation/lp/dividend）、commission、Dividend 交互全部移除；
+///         ITaxProcessor（src/lib 受保护接口）签名不变，兼容视图以零值存根实现
 contract TaxProcessor is ITaxProcessor {
-    uint256 private constant BPS_DENOMINATOR = 10000;
     uint256 private constant DEADLINE_BUFFER = 300;
-    address private constant BLACKHOLE = address(0xdead);
 
     address private immutable _deployer;
     bool private _initialized;
@@ -50,43 +45,19 @@ contract TaxProcessor is ITaxProcessor {
     address public override taxToken;
     address public override router;
     address public override feeReceiver;
-    address public override marketAddress;
-    address public override dividendAddress;
-    address public override commissionReceiver;
-    address public override converter;
-    address public override dividendToken; // address(0) => 使用 quoteToken（V2 语义）
     address public quoteToken; // 存储值；isWeth 时 getQuoteToken 返回 WETH
-
-    uint16 public override commissionBps;
     uint256 public override liqExpectedOutputAmount;
 
-    uint16 private _feeRate;
-    uint16 private _marketBps;
-    uint16 private _deflationBps;
-    uint16 private _lpBps;
-    uint16 private _dividendBps;
-
-    // 分账累计（quote 单位，等待 dispatch 派发；lpQuoteBalance 为流动性通道配对用 quote）
-    uint256 public override feeQuoteBalance;
-    uint256 public override marketQuoteBalance;
-    uint256 public override lpQuoteBalance;
-    uint256 public override pendingDividendQuoteTokenBalance;
-    uint256 public override commissionQuoteBalance;
-
-    // 累计派发计量
-    uint256 public override totalDividendTokenSent;
-    uint256 public override totalQuoteSentToDividend;
-    uint256 public override totalQuoteAddedToLiquidity;
-    uint256 public override totalTokenAddedToLiquidity;
-    uint256 public override totalQuoteSentToMarketing;
+    /// @notice 累计已派发给收款人的 quote 数量（原生 BNB 与 WBNB 两种到账形态合计）
+    uint256 public totalQuoteSentToReceiver;
 
     event Initialized(address indexed taxToken);
     event TaxProcessed(uint256 taxAmount, uint256 quoteOut, int8 direction);
+    event TaxForwarded(address indexed receiver, uint256 amount, bool isNative);
     event FeeForwardedToReceiver(address indexed token, uint256 amount, address indexed receiver);
-    event TokensBurned(uint256 amount);
-    event LPAddFailed(uint256 tokenAmount, uint256 quoteAmount);
-    event LiquidityAdded(uint256 tokenAmount, uint256 quoteAmount, uint256 liquidity);
-    event DividendDepositFailed(uint256 amount);
+
+    /// @dev WETH.withdraw 解包回款入口：仅兜收，不承载业务
+    receive() external payable {}
 
     constructor() {
         _deployer = msg.sender;
@@ -94,8 +65,7 @@ contract TaxProcessor is ITaxProcessor {
     }
 
     modifier onlyTaxToken() {
-        // 放行本合约自身：processTaxTokens 经 this.addLiquidityForTax 外部自调用以隔离 try/catch
-        if (msg.sender != taxToken && msg.sender != address(this)) revert NotTaxToken();
+        if (msg.sender != taxToken) revert NotTaxToken();
         _;
     }
 
@@ -105,33 +75,16 @@ contract TaxProcessor is ITaxProcessor {
         if (params.taxToken == address(0)) revert TaxTokenRequired();
         if (params.router == address(0)) revert RouterRequired();
         if (params.feeReceiver == address(0)) revert FeeReceiverRequired();
-        if (params.feeRate > 10000) revert InvalidBps();
-        // 四通道 + commission 合计必须恰好 10000（平台不抽成，费率零头不允许静默归入 fee）
-        if (
-            uint256(params.marketBps) + params.deflationBps + params.lpBps + params.dividendBps + params.commissionBps
-                != 10000
-        ) revert InvalidBps();
 
         _initialized = true;
 
         taxToken = params.taxToken;
         router = params.router;
         feeReceiver = params.feeReceiver;
-        marketAddress = params.marketAddress;
-        dividendAddress = params.dividendAddress;
-        commissionReceiver = params.commissionReceiver;
-        converter = params.converter;
-        dividendToken = params.dividendToken;
         quoteToken = params.quoteToken;
-
-        _feeRate = params.feeRate;
-        _marketBps = params.marketBps;
-        _deflationBps = params.deflationBps;
-        _lpBps = params.lpBps;
-        _dividendBps = params.dividendBps;
-        commissionBps = params.commissionBps;
         liqExpectedOutputAmount = params.liqExpectedOutputAmount;
 
+        // params 中 bps/dividend/commission/converter 为上游接口兼容位，本实现忽略
         emit Initialized(params.taxToken);
     }
 
@@ -139,71 +92,22 @@ contract TaxProcessor is ITaxProcessor {
     // 核心：处理税
     // ---------------------------------------------------------------------------
 
-    /// @notice 拉取税代币 → 四通道拆分 → 销毁/加池配对/swap → 分账累计
+    /// @notice 拉取税代币 → swap 成 quote(WBNB) → unwrap 原生 BNB → 即时转给 feeReceiver
     /// @return direction 方向信号语义与 FlapTaxTokenV3._adjustLiquidationThreshold 一致：
     ///     > 0 → swap 输出低于参考（价格弱，提高阈值）
     ///     < 0 → swap 输出高于参考（价格强，降低阈值）
     ///     0   → 无参考值或相等
-    // 无递归路径：重入需经代币 _liquidateTax（仅 to==mainPool 且代币自持余额>0 时触发），
-    // 而 processTaxTokens 开头已拉空代币余额；调用方受限 onlyTaxToken/address(this)
-    // slither-disable-next-line reentrancy-no-eth
+    // 重入面：原生转账收款方为发币时固定地址，重入本合约受 onlyTaxToken 限制；
+    // 代币侧 notLiquidating=false 期间税收归零且不再触发清算，无重入套利路径
+    // slither-disable-next-line reentrancy-eth
     function processTaxTokens(uint256 taxAmount) external override onlyTaxToken returns (int8) {
         if (taxAmount == 0) return 0;
 
         TransferHelper.safeTransferFrom(taxToken, msg.sender, address(this), taxAmount);
 
-        // 平铺分配：各通道按【总税额】直接占比（表单语义：四通道凑齐 100%）。
-        // 有意偏离上游嵌套算法（上游对销毁后余额再按比例拆分，导致名义占比失真）。
-        uint256 feePart = (taxAmount * _feeRate) / BPS_DENOMINATOR;
-        uint256 deflationPart = (taxAmount * _deflationBps) / BPS_DENOMINATOR;
-        uint256 marketPart = (taxAmount * _marketBps) / BPS_DENOMINATOR;
-        uint256 lpPart = (taxAmount * _lpBps) / BPS_DENOMINATOR;
-        uint256 dividendPart = (taxAmount * _dividendBps) / BPS_DENOMINATOR;
-        uint256 commissionPart = (taxAmount * commissionBps) / BPS_DENOMINATOR;
-        // 整除零头并入 fee 通道（feeRate=0 时仅含舍入尘埃，dispatch 归入 feeReceiver）
-        uint256 leftover = taxAmount - feePart - deflationPart - marketPart - lpPart - dividendPart - commissionPart;
-
-        // 通缩部分直接销毁
-        if (deflationPart > 0) {
-            TransferHelper.safeTransfer(taxToken, BLACKHOLE, deflationPart);
-            emit TokensBurned(deflationPart);
-        }
-
-        // ── 流动性通道（上游整份额滚动）：先尝试用本期 lp 代币配对已积累的 lp quote 加池 ──
-        uint256 lpTaxToSwap = lpPart;
-        if (lpPart > 0 && lpQuoteBalance > 0) {
-            try this.addLiquidityForTax(lpPart, lpQuoteBalance) returns (
-                uint256 actualTokenUsed, uint256 actualQuoteUsed
-            ) {
-                lpTaxToSwap = lpPart >= actualTokenUsed ? lpPart - actualTokenUsed : 0;
-                lpQuoteBalance = lpQuoteBalance >= actualQuoteUsed ? lpQuoteBalance - actualQuoteUsed : 0;
-            } catch {
-                // 加池失败：保留两侧余额下期重试，本期 lp 全部走 swap 路径（不阻塞清算）
-                emit LPAddFailed(lpPart, lpQuoteBalance);
-            }
-        }
-
-        // 其余全部 swap 成 quote（fee/market/dividend/commission/整除零头/lp剩余）
-        uint256 swapIn = feePart + marketPart + dividendPart + commissionPart + leftover + lpTaxToSwap;
-        uint256 out = 0;
-        if (swapIn > 0) {
-            out = _swapToQuote(swapIn);
-        }
-
-        // 按各通道占 swapIn 的比例分账 quote 收益；舍入零头并入 fee，确保无未追踪 dust
-        if (out > 0 && swapIn > 0) {
-            uint256 feeShare = (out * feePart) / swapIn;
-            uint256 marketShare = (out * marketPart) / swapIn;
-            uint256 dividendShare = (out * dividendPart) / swapIn;
-            uint256 commissionShare = (out * commissionPart) / swapIn;
-            uint256 lpShare = lpTaxToSwap > 0 ? (out * lpTaxToSwap) / swapIn : 0;
-
-            uint256 credited = feeShare + marketShare + dividendShare + commissionShare + lpShare;
-            feeQuoteBalance += feeShare + (out - credited);
-            marketQuoteBalance += marketShare;
-            pendingDividendQuoteTokenBalance += dividendShare;
-            commissionQuoteBalance += commissionShare;
-            lpQuoteBalance += lpShare;
+        uint256 out = _swapToQuote(taxAmount);
+        if (out > 0) {
+            _forwardQuote(out);
         }
 
         // 方向信号（弱化异常场景：swap 失败时 out==0，返回 +1 让其回升阈值→更少清算）
@@ -218,95 +122,19 @@ contract TaxProcessor is ITaxProcessor {
         return direction;
     }
 
-    /// @notice 用税收 lp 份额与累计 lp quote 加池；LP 凭证死锁 0xdead
-    /// @dev 供 processTaxTokens 经 this.xxx 外部调用以隔离 try/catch 的调用栈，
-    ///      仅税代币（即本合约内部流程）可触发。
-    /// @return actualTokenUsed 实际消耗的代币量
-    /// @return actualQuoteUsed 实际消耗的 quote 量
-    function addLiquidityForTax(uint256 tokenAmount, uint256 quoteAmount)
-        external
-        onlyTaxToken
-        returns (uint256 actualTokenUsed, uint256 actualQuoteUsed)
-    {
-        TransferHelper.safeApprove(taxToken, router, tokenAmount);
-        TransferHelper.safeApprove(getQuoteToken(), router, quoteAmount);
-
-        (uint256 amountToken, uint256 amountQuote, uint256 liquidity) = IPancakeRouter02(router)
-            .addLiquidity(
-                taxToken, getQuoteToken(), tokenAmount, quoteAmount, 0, 0, BLACKHOLE, block.timestamp + DEADLINE_BUFFER
-            );
-
-        totalTokenAddedToLiquidity += amountToken;
-        totalQuoteAddedToLiquidity += amountQuote;
-        emit LiquidityAdded(amountToken, amountQuote, liquidity);
-
-        return (amountToken, amountQuote);
-    }
-
-    /// @notice BondingCurve 阶段税（本项目不触发；保留接口兼容）
+    /// @notice BondingCurve 阶段税（本项目不触发；保留接口兼容）：quote 直转收款人
     function processBondingCurveTax(uint256 quoteAmount) external override onlyTaxToken {
         if (quoteAmount == 0) return;
         TransferHelper.safeTransferFrom(getQuoteToken(), msg.sender, address(this), quoteAmount);
-        marketQuoteBalance += quoteAmount;
+        _forwardQuote(quoteAmount);
     }
 
-    /// @notice 派发累计 quote 余额到各接收方；分红通道 deposit 进 Dividend 合约
-    /// @dev 权限开放（任何人可触发派发，push 模型）；CEI：先清账再交互
-    function dispatch() external override {
-        if (feeQuoteBalance > 0 && feeReceiver != address(0)) {
-            uint256 amount = feeQuoteBalance;
-            feeQuoteBalance = 0;
-            TransferHelper.safeTransfer(getQuoteToken(), feeReceiver, amount);
-        }
+    /// @notice 接口兼容存根：本实现清算即派发，无累计余额可派发，恒为 no-op
+    function dispatch() external override {}
 
-        if (marketQuoteBalance > 0) {
-            uint256 amount = marketQuoteBalance;
-            marketQuoteBalance = 0;
-            address to = marketAddress != address(0) ? marketAddress : feeReceiver;
-            TransferHelper.safeTransfer(getQuoteToken(), to, amount);
-            totalQuoteSentToMarketing += amount;
-        }
-
-        // ── 分红通道：存入 Dividend 合约按持仓分账 ──
-        if (pendingDividendQuoteTokenBalance > 0) {
-            uint256 amount = pendingDividendQuoteTokenBalance;
-            pendingDividendQuoteTokenBalance = 0;
-            _depositDividend(amount);
-        }
-
-        if (commissionQuoteBalance > 0) {
-            uint256 amount = commissionQuoteBalance;
-            commissionQuoteBalance = 0;
-            address to = commissionReceiver != address(0) ? commissionReceiver : feeReceiver;
-            TransferHelper.safeTransfer(getQuoteToken(), to, amount);
-        }
-    }
-
-    /// @notice 将分红 quote 存入 Dividend 合约；无 Dividend 或存款失败时兜底转 feeReceiver
-    /// @dev IDividend.deposit 在 totalShares==0（尚无达标持有人）时返回 false ——
-    ///      此时资金转 feeReceiver 而非无限挂起（launchpad 场景无链下 keeper 重试机制）。
-    ///      deposit 内部用 pull 模式（safeTransferFrom），需先授权。
-    ///      兜底恒为 feeReceiver：绝不把资金裸转进 Dividend（不经 deposit 计账 = 无法被领取）。
-    function _depositDividend(uint256 amount) internal {
-        if (dividendAddress == address(0)) {
-            TransferHelper.safeTransfer(getQuoteToken(), feeReceiver, amount);
-            return;
-        }
-
-        TransferHelper.safeApprove(getQuoteToken(), dividendAddress, amount);
-        try IDividend(dividendAddress).deposit(amount) returns (bool success) {
-            if (success) {
-                totalDividendTokenSent += amount;
-                totalQuoteSentToDividend += amount;
-                return;
-            }
-        } catch {
-            // fall through 到兜底
-        }
-        // 存款失败/无份额：转 feeReceiver，不锁定资金
-        TransferHelper.safeTransfer(getQuoteToken(), feeReceiver, amount);
-        emit DividendDepositFailed(amount);
-    }
+    // ---------------------------------------------------------------------------
+    // 内部：swap 与派发
+    // ---------------------------------------------------------------------------
 
     /// @notice 将税代币换成 quote token；失败时直接给 feeReceiver 兜底并记录事件
     function _swapToQuote(uint256 amountIn) internal returns (uint256 out) {
@@ -336,7 +164,8 @@ contract TaxProcessor is ITaxProcessor {
         try IPancakeRouter02(router)
             .swapExactTokensForTokensSupportingFeeOnTransferTokens(
                 amountIn, 0, path, address(this), block.timestamp + DEADLINE_BUFFER
-            ) {}
+            )
+        {}
         catch {
             TransferHelper.safeTransfer(taxToken, feeReceiver, amountIn); // 兑换失败兜底，不锁定资金
             emit FeeForwardedToReceiver(taxToken, amountIn, feeReceiver);
@@ -344,6 +173,32 @@ contract TaxProcessor is ITaxProcessor {
         }
 
         out = IERC20(quote).balanceOf(address(this)) - before;
+    }
+
+    /// @notice 派发 quote 给 feeReceiver：WETH 先解包原生 BNB 转账；
+    ///         收款方拒收原生币（无 receive 的合约）时包回 WBNB 走 ERC20 转账
+    /// @dev CEI：totalQuoteSentToReceiver 先记账再外呼；原生转账收款方为发币时固定地址
+    // slither-disable-next-line reentrancy-eth
+    function _forwardQuote(uint256 amount) internal {
+        totalQuoteSentToReceiver += amount;
+
+        address quote = getQuoteToken();
+        if (quote != weth()) {
+            TransferHelper.safeTransfer(quote, feeReceiver, amount);
+            emit TaxForwarded(feeReceiver, amount, false);
+            return;
+        }
+
+        IWETH(quote).withdraw(amount); // 解包：原生 BNB 回到本合约（receive 兜收）
+        (bool ok,) = feeReceiver.call{value: amount}("");
+        if (ok) {
+            emit TaxForwarded(feeReceiver, amount, true);
+            return;
+        }
+        // 原生转账失败不吞资金：包回 WBNB 走 ERC20 转账
+        IWETH(quote).deposit{value: amount}();
+        TransferHelper.safeTransfer(quote, feeReceiver, amount);
+        emit TaxForwarded(feeReceiver, amount, false);
     }
 
     // ---------------------------------------------------------------------------
@@ -366,46 +221,111 @@ contract TaxProcessor is ITaxProcessor {
         return address(0xdead);
     }
 
-    /// @notice 兼容视图：累计待派发的分红 quote
-    function dividendQuoteBalance() external view override returns (uint256) {
-        return pendingDividendQuoteTokenBalance;
+    // ── 上游四通道兼容存根：本实现单通道，恒零值 ──
+
+    function marketAddress() external pure override returns (address) {
+        return address(0);
     }
 
-    /// @notice dividend token 侧余额（本实现不单独持有 dividend token，恒 0）
+    function dividendAddress() external pure override returns (address) {
+        return address(0);
+    }
+
+    function commissionReceiver() external pure override returns (address) {
+        return address(0);
+    }
+
+    function converter() external pure override returns (address) {
+        return address(0);
+    }
+
+    function dividendToken() external pure override returns (address) {
+        return address(0);
+    }
+
+    function commissionBps() external pure override returns (uint16) {
+        return 0;
+    }
+
+    function feeQuoteBalance() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function lpQuoteBalance() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function marketQuoteBalance() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function pendingDividendQuoteTokenBalance() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function dividendQuoteBalance() external pure override returns (uint256) {
+        return 0;
+    }
+
     function dividendTokenBalance() external pure override returns (uint256) {
         return 0;
     }
 
+    function commissionQuoteBalance() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function totalDividendTokenSent() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function totalQuoteSentToDividend() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function totalQuoteAddedToLiquidity() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function totalTokenAddedToLiquidity() external pure override returns (uint256) {
+        return 0;
+    }
+
+    function totalQuoteSentToMarketing() external pure override returns (uint256) {
+        return 0;
+    }
+
     function requiresMEVProtection() external view override returns (bool) {
-        return dividendToken != address(0) && dividendToken != quoteToken && dividendToken != taxToken;
+        return false;
     }
 
     function feeConfig() external view override returns (PackedFeeConfig memory) {
         return PackedFeeConfig({
-            marketBps: _marketBps,
-            deflationBps: _deflationBps,
-            lpBps: _lpBps,
-            dividendBps: _dividendBps,
-            feeRate: _feeRate,
+            marketBps: 0,
+            deflationBps: 0,
+            lpBps: 0,
+            dividendBps: 0,
+            feeRate: 0,
             isWeth: isWeth()
         });
     }
 
     function feeConfigV2() external view override returns (PackedFeeConfigV2 memory) {
         return PackedFeeConfigV2({
-            marketBps: _marketBps,
-            deflationBps: _deflationBps,
-            lpBps: _lpBps,
-            dividendBps: _dividendBps,
-            feeRate: _feeRate,
+            marketBps: 0,
+            deflationBps: 0,
+            lpBps: 0,
+            dividendBps: 0,
+            feeRate: 0,
             isWeth: isWeth(),
-            commissionBps: commissionBps,
-            dividendToken: dividendToken
+            commissionBps: 0,
+            dividendToken: address(0)
         });
     }
 }
 
-    /// @notice Dividend 合约接口（仅本合约所需子集；完整定义见 src/lib/dividend/IDividend.sol）
-    interface IDividend {
-        function deposit(uint256 amount) external returns (bool success);
-    }
+/// @notice 最小 WETH 接口（解包/包装原生 BNB）
+interface IWETH {
+    function deposit() external payable;
+    function withdraw(uint256 amount) external;
+}

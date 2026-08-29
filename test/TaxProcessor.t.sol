@@ -3,9 +3,16 @@
 pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
-import {TaxProcessor, InvalidBps, NotTaxToken} from "src/TaxProcessor.sol";
-import {TaxProcessorInitParams, PackedFeeConfig} from "src/lib/interfaces/ITaxProcessor.sol";
-import {Dividend} from "src/lib/dividend/Dividend.sol";
+import {
+    TaxProcessor,
+    AlreadyInitialized,
+    NotDeployer,
+    TaxTokenRequired,
+    RouterRequired,
+    FeeReceiverRequired,
+    NotTaxToken
+} from "src/TaxProcessor.sol";
+import {TaxProcessorInitParams} from "src/lib/interfaces/ITaxProcessor.sol";
 
 contract MockERC20 {
     string public name;
@@ -53,11 +60,10 @@ contract MockERC20 {
     }
 }
 
-/// @notice 模拟路由：1:1 兑换；addLiquidity 全额拉币并记录 LP 接收方
+/// @notice 模拟路由：1:1 兑换（输出铸造到 path 末位代币）；可注入兑换失败
 contract MockSwapRouter {
     address public weth;
-    address public lastLPReceiver;
-    uint256 public lpMinted;
+    bool public failSwap;
 
     constructor(address _weth) {
         weth = _weth;
@@ -67,6 +73,10 @@ contract MockSwapRouter {
         return weth;
     }
 
+    function setFailSwap(bool v) external {
+        failSwap = v;
+    }
+
     function swapExactTokensForTokensSupportingFeeOnTransferTokens(
         uint256 amountIn,
         uint256,
@@ -74,102 +84,73 @@ contract MockSwapRouter {
         address to,
         uint256
     ) external {
-        // 1:1 模拟兑换：拉取 taxToken，铸 quote 给接收方
+        if (failSwap) revert("mock: swap failed");
+        // 1:1 模拟兑换：拉取 path[0]，铸 path 末位代币给接收方
         MockERC20(path[0]).transferFrom(msg.sender, address(this), amountIn);
-        MockERC20(path[1]).mint(to, amountIn);
-    }
-
-    function addLiquidity(
-        address tokenA,
-        address tokenB,
-        uint256 amountADesired,
-        uint256 amountBDesired,
-        uint256,
-        uint256,
-        address to,
-        uint256
-    ) external returns (uint256, uint256, uint256) {
-        if (failAddLiquidity) {
-            revert("mock: addLiquidity failed");
-        }
-        MockERC20(tokenA).transferFrom(msg.sender, address(this), amountADesired);
-        MockERC20(tokenB).transferFrom(msg.sender, address(this), amountBDesired);
-        lastLPReceiver = to;
-        lpMinted += 1e18;
-        return (amountADesired, amountBDesired, 1e18);
-    }
-
-    /// @notice 可让加池失败（测试 try/catch 回退路径）
-    bool public failAddLiquidity;
-
-    function setFailAddLiquidity(bool v) external {
-        failAddLiquidity = v;
+        MockERC20(path[path.length - 1]).mint(to, amountIn);
     }
 }
 
-/// @notice 可解包的原生币模拟 WBNB（供 Dividend unwraps 路径测试）
+/// @notice 可解包/包装原生币的模拟 WBNB
 contract MockWBNB is MockERC20 {
     constructor() MockERC20("WBNB", "WBNB") {}
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+        totalSupply += msg.value;
+    }
 
     function withdraw(uint256 amount) external {
         balanceOf[msg.sender] -= amount;
         payable(msg.sender).transfer(amount);
     }
 
-    receive() external payable {}
+    receive() external payable {
+        balanceOf[msg.sender] += msg.value;
+        totalSupply += msg.value;
+    }
 }
+
+/// @notice 无 receive/fallback 的收款合约：拒收原生 BNB（测试 WBNB 兜底路径）
+contract NoReceiveReceiver {}
 
 contract TaxProcessorTest is Test {
     MockERC20 taxToken;
-    MockERC20 wbnb;
+    MockWBNB wbnb;
     MockSwapRouter router;
     TaxProcessor tp;
-    Dividend dividendImpl;
 
     address feeReceiver = address(0xfee1);
-    address marketReceiver = address(0x9999);
 
     function setUp() public {
         taxToken = new MockERC20("Tax", "TAX");
-        wbnb = new MockERC20("WBNB", "WBNB");
+        wbnb = new MockWBNB();
         router = new MockSwapRouter(address(wbnb));
         tp = new TaxProcessor();
-        dividendImpl = new Dividend(address(wbnb), address(0xdead));
 
-        tp.initialize(_params(address(0), 0)); // 默认无 Dividend 实例
+        // MockWBNB 凭空铸出 WBNB，需预注 native 偿付 withdraw 解包
+        vm.deal(address(wbnb), 1_000_000 ether);
+
+        tp.initialize(_params(0));
 
         taxToken.mint(address(taxToken), 1000000 ether); // 模拟 V3：税在代币合约自己手里
         vm.prank(address(taxToken));
         taxToken.approve(address(tp), type(uint256).max); // 模拟 V3 的 _processTax 无限授权
     }
 
-    /// @notice EIP-1167 克隆 Dividend 实现（实现合约构造器已禁用初始化器，必须克隆使用）
-    function _cloneDividend() internal returns (address instance) {
-        address impl = address(dividendImpl);
-        bytes32 salt = keccak256(abi.encodePacked(block.timestamp, msg.sender, tx.origin, gasleft()));
-        assembly {
-            let ptr := mload(0x40)
-            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
-            mstore(add(ptr, 0x14), shl(0x60, impl))
-            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
-            instance := create2(0, ptr, 0x37, salt)
-        }
-        require(instance != address(0), "clone failed");
-    }
-
-    function _params(address dividendAddr, uint256 expectedOut) internal view returns (TaxProcessorInitParams memory) {
+    function _params(uint256 expectedOut) internal view returns (TaxProcessorInitParams memory) {
         return TaxProcessorInitParams({
             quoteToken: address(wbnb),
             router: address(router),
             feeReceiver: feeReceiver,
-            marketAddress: marketReceiver,
-            dividendAddress: dividendAddr,
+            marketAddress: address(0),
+            dividendAddress: address(0),
             taxToken: address(taxToken),
-            feeRate: 0, // 平台不抽成
-            marketBps: 4000, // 创作者钱包 40%
-            deflationBps: 2000, // 销毁 20%
-            lpBps: 2000, // 流动性 20%
-            dividendBps: 2000, // 分红 20%
+            feeRate: 0,
+            marketBps: 0,
+            deflationBps: 0,
+            lpBps: 0,
+            dividendBps: 0,
             dividendToken: address(0),
             commissionReceiver: address(0),
             commissionBps: 0,
@@ -178,143 +159,170 @@ contract TaxProcessorTest is Test {
         });
     }
 
-    function test_ProcessTaxSplit() public {
+    /// @notice 为新 processor 实例补充模拟 V3 的无限授权
+    function _authorize(TaxProcessor processor) internal {
+        vm.prank(address(taxToken));
+        taxToken.approve(address(processor), type(uint256).max);
+    }
+
+    // -------------------------------------------------------------------------
+    // 主路径：swap → 原生 BNB → 收款人
+    // -------------------------------------------------------------------------
+
+    function test_ForwardsNativeToReceiver() public {
         vm.prank(address(taxToken)); // 模拟 V3 代币回调
         int8 direction = tp.processTaxTokens(10000 ether);
 
         assertEq(direction, 0, "no reference -> no direction");
+        assertEq(feeReceiver.balance, 10000 ether, "receiver got native BNB");
+        assertEq(wbnb.balanceOf(address(tp)), 0, "no WBNB dust left");
+        assertEq(address(tp).balance, 0, "no native dust left");
+        assertEq(taxToken.balanceOf(address(tp)), 0, "all tax tokens swapped");
+        assertEq(tp.totalQuoteSentToReceiver(), 10000 ether);
 
-        // 平铺四通道：burn 20%=2000 销毁；market 40%=4000 / lp 20%=2000 / dividend 20%=2000
-        // 首期 lp 无积累 quote 不配对，随其他通道全部 swap：swapIn=8000 → 1:1 → out 8000
-        assertEq(tp.marketQuoteBalance(), 4000 ether);
-        assertEq(tp.pendingDividendQuoteTokenBalance(), 2000 ether);
-        assertEq(tp.lpQuoteBalance(), 2000 ether, "lp quote credited for next-round pairing");
-        assertEq(tp.feeQuoteBalance(), 0);
-        // 销毁通道已烧
-        assertEq(taxToken.balanceOf(address(0xdead)), 2000 ether);
-        // 代币全部换出，processor 不留库存
-        assertEq(taxToken.balanceOf(address(tp)), 0);
+        // 第二轮：累计器与余额持续叠加（清算即派发，无残留分账）
+        vm.prank(address(taxToken));
+        tp.processTaxTokens(5000 ether);
+        assertEq(feeReceiver.balance, 15000 ether);
+        assertEq(tp.totalQuoteSentToReceiver(), 15000 ether);
     }
 
-    function test_LPRollingPairsOnSecondRound() public {
-        // 第一期：lp 份额无 quote 配对 → 全部 swap，收益回填 lpQuoteBalance
+    function test_SwapFailureForwardsTokensToReceiver() public {
+        router.setFailSwap(true);
+
         vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether);
-        assertEq(tp.lpQuoteBalance(), 2000 ether);
+        int8 direction = tp.processTaxTokens(10000 ether);
 
-        // 第二期：本期 lp 2000 与上期积累 2000 配对加池，LP 死锁 0xdead
-        vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether);
-
-        assertEq(router.lastLPReceiver(), address(0xdead), unicode"LP 凭证死锁黑洞");
-        assertEq(tp.totalTokenAddedToLiquidity(), 2000 ether);
-        assertEq(tp.totalQuoteAddedToLiquidity(), 2000 ether);
-        // 配对消耗完旧积累；本期 lp 已全部用于配对 → 无新增回填
-        assertEq(tp.lpQuoteBalance(), 0);
-
-        // 两期累计派发桶：market 各 4000，dividend 各 2000
-        assertEq(tp.marketQuoteBalance(), 8000 ether);
-        assertEq(tp.pendingDividendQuoteTokenBalance(), 4000 ether);
+        // 兑换失败兜底：税代币原形态直转收款人，不锁资金
+        assertEq(taxToken.balanceOf(feeReceiver), 10000 ether);
+        assertEq(feeReceiver.balance, 0);
+        assertEq(tp.totalQuoteSentToReceiver(), 0);
+        assertEq(direction, 0, "no reference -> no direction");
     }
 
-    function test_LPPairingFailureFallsBackToSwap() public {
-        vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether); // 积累 lpQuoteBalance = 2000
-        router.setFailAddLiquidity(true);
+    function test_ReceiverRejectsNativeFallsBackToWBNB() public {
+        NoReceiveReceiver rejecter = new NoReceiveReceiver();
+
+        TaxProcessor tp2 = new TaxProcessor();
+        TaxProcessorInitParams memory p = _params(0);
+        p.feeReceiver = address(rejecter);
+        tp2.initialize(p);
+        _authorize(tp2);
 
         vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether); // 配对失败 → 本期 lp 全走 swap
+        tp2.processTaxTokens(10000 ether);
 
-        // 加池未发生
-        assertEq(tp.totalTokenAddedToLiquidity(), 0);
-        // 旧积累保留待重试 + 本期 lp 收益回填
-        assertEq(tp.lpQuoteBalance(), 4000 ether);
-        assertEq(tp.marketQuoteBalance(), 8000 ether);
+        // 原生转账被拒 → 包回 WBNB 走 ERC20，资金不锁死
+        assertEq(wbnb.balanceOf(address(rejecter)), 10000 ether, "WBNB ERC20 fallback");
+        assertEq(address(tp2).balance, 0, "no native stuck");
+        assertEq(wbnb.balanceOf(address(tp2)), 0, "no WBNB stuck");
+        assertEq(tp2.totalQuoteSentToReceiver(), 10000 ether);
     }
 
-    function test_DispatchWithoutDividendContract() public {
+    function test_QuoteTokenNotWethForwardsERC20() public {
+        MockERC20 usdt = new MockERC20("USDT", "USDT");
+        MockSwapRouter router2 = new MockSwapRouter(address(wbnb));
+
+        TaxProcessor tp2 = new TaxProcessor();
+        TaxProcessorInitParams memory p = _params(0);
+        p.quoteToken = address(usdt);
+        p.router = address(router2);
+        tp2.initialize(p);
+        _authorize(tp2);
+
         vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether);
+        tp2.processTaxTokens(10000 ether);
 
-        uint256 marketBalBefore = wbnb.balanceOf(marketReceiver);
-        tp.dispatch();
-
-        assertEq(wbnb.balanceOf(marketReceiver), marketBalBefore + 4000 ether); // 创作者钱包
-        assertEq(wbnb.balanceOf(feeReceiver), 2000 ether); // 分红无实例 → 归 feeReceiver 兜底
-        assertEq(tp.marketQuoteBalance(), 0);
-        assertEq(tp.pendingDividendQuoteTokenBalance(), 0);
-        assertEq(tp.totalQuoteSentToMarketing(), 4000 ether);
+        // path: taxToken → WBNB → USDT，1:1 输出以 USDT 形态 ERC20 直转
+        assertEq(usdt.balanceOf(feeReceiver), 10000 ether);
+        assertEq(feeReceiver.balance, 0, "no native for non-weth quote");
     }
 
-    function test_DispatchDepositsIntoDividend() public {
-        // Dividend 是"实现 + 克隆"模式：构造器禁用初始化器，直接 new 出的实例不可初始化
-        Dividend dividend = Dividend(payable(_cloneDividend()));
-        dividend.initialize(address(wbnb), address(taxToken), 0);
-        address alice = address(0xa11ce);
-        vm.prank(address(taxToken));
-        dividend.setShare(alice, 1000 ether);
-
-        tp = new TaxProcessor();
-        tp.initialize(_params(address(dividend), 0));
-        vm.prank(address(taxToken));
-        taxToken.approve(address(tp), type(uint256).max); // 模拟 V3 对新 processor 的无限授权
-
-        vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether);
-        assertEq(tp.pendingDividendQuoteTokenBalance(), 2000 ether);
-
-        tp.dispatch(); // 分红 2000 存入 Dividend，alice 为唯一份额人全额归属
-
-        assertEq(wbnb.balanceOf(address(dividend)), 2000 ether);
-        assertEq(dividend.withdrawableDividends(alice), 2000 ether);
-        assertEq(tp.totalDividendTokenSent(), 2000 ether);
-        assertEq(tp.pendingDividendQuoteTokenBalance(), 0);
-    }
-
-    function test_DividendDepositNoShareholdersFallsBackToFee() public {
-        // 无任何份额人的 Dividend：deposit 返回 false → 资金兜底转 feeReceiver
-        Dividend dividend = Dividend(payable(_cloneDividend()));
-        dividend.initialize(address(wbnb), address(taxToken), 0);
-
-        tp = new TaxProcessor();
-        tp.initialize(_params(address(dividend), 0));
-        vm.prank(address(taxToken));
-        taxToken.approve(address(tp), type(uint256).max); // 模拟 V3 对新 processor 的无限授权
-
-        vm.prank(address(taxToken));
-        tp.processTaxTokens(10000 ether);
-        tp.dispatch();
-
-        assertEq(wbnb.balanceOf(address(dividend)), 0);
-        assertEq(wbnb.balanceOf(feeReceiver), 2000 ether);
-        assertTrue(tp.pendingDividendQuoteTokenBalance() == 0);
-    }
+    // -------------------------------------------------------------------------
+    // 方向信号（动态清算阈值）
+    // -------------------------------------------------------------------------
 
     function test_DirectionSignal() public {
+        // 参考低于输出（out=10000 > 5000）→ 价格强 → -1
         TaxProcessor tp2 = new TaxProcessor();
-        tp2.initialize(_params(address(0), 5000 ether)); // 参考 5000 < out 8000 → 价格强 → -1
+        tp2.initialize(_params(5000 ether));
+        _authorize(tp2);
+        vm.prank(address(taxToken));
+        assertEq(tp2.processTaxTokens(10000 ether), -1, "out above reference -> decrease threshold");
 
+        // 参考高于输出（out=10000 < 20000）→ 价格弱 → +1
+        TaxProcessor tp3 = new TaxProcessor();
+        tp3.initialize(_params(20000 ether));
+        _authorize(tp3);
         vm.prank(address(taxToken));
-        taxToken.approve(address(tp2), type(uint256).max); // 模拟 V3 对新 processor 的授权
-        vm.prank(address(taxToken));
-        int8 direction = tp2.processTaxTokens(10000 ether);
-        assertEq(direction, -1, "out above reference -> decrease threshold");
+        assertEq(tp3.processTaxTokens(10000 ether), 1, "out below reference -> increase threshold");
     }
 
-    function test_RevertWhen_ChannelSumNotTenThousand() public {
+    // -------------------------------------------------------------------------
+    // BondingCurve 兼容存根与 no-op dispatch
+    // -------------------------------------------------------------------------
+
+    function test_ProcessBondingCurveTaxForwardsQuote() public {
+        wbnb.mint(address(taxToken), 500 ether); // BondingCurve 税以 quote 形态持有
+        vm.prank(address(taxToken));
+        wbnb.approve(address(tp), type(uint256).max);
+
+        vm.prank(address(taxToken));
+        tp.processBondingCurveTax(500 ether);
+
+        assertEq(feeReceiver.balance, 500 ether, "quote forwarded as native");
+        assertEq(tp.totalQuoteSentToReceiver(), 500 ether);
+    }
+
+    function test_DispatchIsNoop() public {
+        // 清算即派发：dispatch 恒为 no-op，任何人可调用且无副作用
+        tp.dispatch();
+        assertEq(feeReceiver.balance, 0);
+    }
+
+    function test_ZeroAmountNoop() public {
+        vm.prank(address(taxToken));
+        assertEq(tp.processTaxTokens(0), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 权限与初始化校验
+    // -------------------------------------------------------------------------
+
+    function test_RevertWhen_TaxTokenZero() public {
         TaxProcessor tp2 = new TaxProcessor();
-        TaxProcessorInitParams memory p = _params(address(0), 0);
-        p.marketBps = 3000; // 合计 9000 ≠ 10000
-        vm.expectRevert(InvalidBps.selector);
+        TaxProcessorInitParams memory p = _params(0);
+        p.taxToken = address(0);
+        vm.expectRevert(TaxTokenRequired.selector);
         tp2.initialize(p);
     }
 
-    function test_RevertWhen_FeeRateTooHigh() public {
+    function test_RevertWhen_RouterZero() public {
         TaxProcessor tp2 = new TaxProcessor();
-        TaxProcessorInitParams memory p = _params(address(0), 0);
-        p.feeRate = 10001;
-        vm.expectRevert(InvalidBps.selector);
+        TaxProcessorInitParams memory p = _params(0);
+        p.router = address(0);
+        vm.expectRevert(RouterRequired.selector);
         tp2.initialize(p);
+    }
+
+    function test_RevertWhen_FeeReceiverZero() public {
+        TaxProcessor tp2 = new TaxProcessor();
+        TaxProcessorInitParams memory p = _params(0);
+        p.feeReceiver = address(0);
+        vm.expectRevert(FeeReceiverRequired.selector);
+        tp2.initialize(p);
+    }
+
+    function test_RevertWhen_AlreadyInitialized() public {
+        vm.expectRevert(AlreadyInitialized.selector);
+        tp.initialize(_params(0));
+    }
+
+    function test_RevertWhen_NotDeployer() public {
+        TaxProcessor tp2 = new TaxProcessor();
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(NotDeployer.selector);
+        tp2.initialize(_params(0));
     }
 
     function test_OnlyTaxToken() public {
@@ -322,6 +330,6 @@ contract TaxProcessorTest is Test {
         tp.processTaxTokens(1 ether); // 非税代币地址调用
 
         vm.expectRevert(NotTaxToken.selector);
-        tp.addLiquidityForTax(1 ether, 1 ether); // 外部随机地址不可触发加池
+        tp.processBondingCurveTax(1 ether);
     }
 }

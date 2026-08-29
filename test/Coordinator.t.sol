@@ -6,19 +6,11 @@ import {Test} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
 import {PRESALE, PresaleSoldOut, NothingToClaim, InvalidStatus} from "src/Presale.sol";
-import {
-    CoordinatorFactory,
-    NotTokenCreator,
-    InvalidAllocationBps,
-    InvalidMaxBuyPerWallet,
-    AlreadyConfigured
-} from "src/CoordinatorFactory.sol";
+import {CoordinatorFactory, NotTokenCreator, InvalidMaxBuyPerWallet, AlreadyConfigured} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig, BuyFeeTooHigh, SellFeeTooHigh} from "src/TokenFactory.sol";
 import {TaxProcessor} from "src/TaxProcessor.sol";
 import {PackedFeeConfig} from "src/lib/interfaces/ITaxProcessor.sol";
 import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
-import {Clones} from "src/Clones.sol";
-import {Dividend} from "src/lib/dividend/Dividend.sol";
 
 contract MockPairFactory {
     address public pair;
@@ -82,13 +74,10 @@ contract CoordinatorTest is Test {
         pairFactory.pair();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
 
-        Dividend dividendImpl = new Dividend(address(0xAABB), address(0xdead));
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));
         PRESALE template = new PRESALE();
         presaleFactory = new PresaleFactory(address(template), address(0));
-        coordinator = new CoordinatorFactory(
-            address(tokenFactory), address(presaleFactory), address(router), address(dividendImpl)
-        );
+        coordinator = new CoordinatorFactory(address(tokenFactory), address(presaleFactory), address(router));
 
         // 测试合约是工厂 admin，直接授予 Coordinator 角色
         tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(coordinator));
@@ -254,7 +243,7 @@ contract CoordinatorTest is Test {
     }
 
     // ---------------------------------------------------------------------------
-    // 新增：四通道 / 退款 / 税率上限 / Dividend 部署 / maxBuy 校验
+    // 新增：单通道税金接线 / 退款 / 税率上限 / maxBuy 校验
     // ---------------------------------------------------------------------------
 
     function test_RefundsExcessCreationFee() public {
@@ -265,13 +254,28 @@ contract CoordinatorTest is Test {
         assertEq(creator.balance, balanceBefore - 0.005 ether);
     }
 
-    function test_RevertWhen_AllocationSumWrong() public {
-        TokenConfig memory cfg = _tokenConfig();
-        cfg.marketBps = 5000; // 5000+2000+2000+2000 = 11000 ≠ 10000
-        vm.deal(creator, 1 ether);
-        vm.prank(creator);
-        vm.expectRevert(InvalidAllocationBps.selector);
-        coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
+    function test_TaxProcessorSingleReceiverWiring() public {
+        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
+        address processor = FlapTaxTokenV3(token).taxProcessor();
+
+        // 唯一收款人接线：feeRecipient（发币时固定，运行期不可变）
+        assertEq(TaxProcessor(payable(processor)).feeReceiver(), feeReceiver);
+        assertEq(TaxProcessor(payable(processor)).taxToken(), token);
+        assertEq(TaxProcessor(payable(processor)).router(), address(router));
+        assertEq(TaxProcessor(payable(processor)).getQuoteToken(), address(0xAABB)); // WBNB
+
+        // 单通道：无 Dividend、无四通道配置
+        assertEq(TaxProcessor(payable(processor)).dividendAddress(), address(0));
+        assertEq(FlapTaxTokenV3(token).dividendContract(), address(0));
+        PackedFeeConfig memory cfg = TaxProcessor(payable(processor)).feeConfig();
+        assertEq(cfg.marketBps, 0);
+        assertEq(cfg.deflationBps, 0);
+        assertEq(cfg.lpBps, 0);
+        assertEq(cfg.dividendBps, 0);
+        assertEq(cfg.feeRate, 0);
+
+        // meta 元数据已透传
+        assertEq(FlapTaxTokenV3(token).metaURI(), "ipfs://QmTestMeta");
     }
 
     function test_RevertWhen_TaxAboveTenPercent() public {
@@ -287,40 +291,6 @@ contract CoordinatorTest is Test {
         vm.prank(creator);
         vm.expectRevert(SellFeeTooHigh.selector);
         coordinator.createToken{value: 1 ether}(cfg2, bytes32(0));
-    }
-
-    function test_DeploysDividendWhenChannelOn() public {
-        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
-        address dividend = coordinator.tokenDividends(token);
-        assertTrue(dividend != address(0), "dividend deployed");
-        assertEq(Dividend(payable(dividend)).owner(), address(coordinator)); // 平台托管
-        assertEq(Dividend(payable(dividend)).dividendToken(), address(0xAABB)); // WBNB
-        assertEq(Dividend(payable(dividend)).taxToken(), token);
-
-        // TaxProcessor 分红地址已接线
-        address processor = FlapTaxTokenV3(token).taxProcessor();
-        assertEq(TaxProcessor(processor).dividendAddress(), dividend);
-        // 代币持仓同步合约已接线
-        assertEq(FlapTaxTokenV3(token).dividendContract(), dividend);
-        // meta 元数据已透传
-        assertEq(FlapTaxTokenV3(token).metaURI(), "ipfs://QmTestMeta");
-        // 四通道配置已透传
-        PackedFeeConfig memory cfg = TaxProcessor(processor).feeConfig();
-        assertEq(cfg.marketBps, 4000);
-        assertEq(cfg.deflationBps, 2000);
-        assertEq(cfg.lpBps, 2000);
-        assertEq(cfg.dividendBps, 2000);
-        assertEq(cfg.feeRate, 0); // 平台不抽成
-    }
-
-    function test_NoDividendWhenZeroBps() public {
-        TokenConfig memory cfg = _tokenConfig();
-        cfg.dividendBps = 0;
-        cfg.marketBps = 6000; // 保持合计 10000
-        vm.prank(creator);
-        (address token,) = coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
-        assertEq(coordinator.tokenDividends(token), address(0));
-        assertEq(FlapTaxTokenV3(token).dividendContract(), address(0));
     }
 
     function test_ZeroAntiFarmerDurationAllowed() public {
@@ -340,20 +310,6 @@ contract CoordinatorTest is Test {
         coordinator.setupPresale(token, cfg);
     }
 
-    function test_DividendAdminPassthrough() public {
-        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
-        address dividend = coordinator.tokenDividends(token);
-        address holder = address(0x7777);
-
-        vm.prank(address(this)); // 测试合约是 admin
-        coordinator.dividendExcludeAddress(token, holder);
-        assertTrue(Dividend(payable(dividend)).excludedFromDividends(holder));
-
-        vm.prank(address(this));
-        coordinator.dividendUnexcludeAddress(token, holder);
-        assertFalse(Dividend(payable(dividend)).excludedFromDividends(holder));
-    }
-
     function _tokenConfig() internal view returns (TokenConfig memory) {
         return TokenConfig({
             name: "TeamToken",
@@ -362,15 +318,9 @@ contract CoordinatorTest is Test {
             buyTax: 300,
             sellTax: 500,
             feeRecipient: feeReceiver,
-            marketAddress: address(0x9999),
             taxDuration: 7 days,
             antiFarmerDuration: 1 days,
-            liqExpectedOutputAmount: 0,
-            marketBps: 4000, // 创作者/营销 40%
-            deflationBps: 2000, // 销毁 20%
-            dividendBps: 2000, // 分红 20%
-            lpBps: 2000, // 流动性 20%
-            minHolderBalance: 0
+            liqExpectedOutputAmount: 0
         });
     }
 

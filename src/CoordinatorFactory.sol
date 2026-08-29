@@ -12,7 +12,6 @@ import {PRESALE, ITokenMigration} from "src/Presale.sol";
 import {TaxProcessor} from "src/TaxProcessor.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
 import {ITaxProcessor, TaxProcessorInitParams} from "src/lib/interfaces/ITaxProcessor.sol";
-import {Clones} from "src/Clones.sol";
 import {TransferHelper} from "src/TransferHelper.sol";
 
 // ---------------------------------------------------------------------------
@@ -31,9 +30,6 @@ error NoSupply();
 error TokenTransferFailed();
 error NoFeesToWithdraw();
 error WithdrawFailed();
-error InvalidAllocationBps();
-error DividendNotDeployed();
-error RefundFailed();
 error InvalidMaxBuyPerWallet();
 error ZeroCreationFee();
 error AlreadyConfigured();
@@ -43,25 +39,13 @@ error AddressAlreadyReserved();
 error AddressAlreadyDeployed();
 error NotReserver();
 
-/// @notice 平台侧对每代币 Dividend 实例的管理子集（完整接口见 src/lib/dividend/IDividend.sol）
-interface IPlatformDividend {
-    function initialize(address dividendToken_, address taxToken_, uint256 minimumShareBalance_) external;
-    function excludeAddress(address addr) external;
-    function unexcludeAddress(address addr) external;
-    function setMinimumShareBalance(uint256 newMinimumShareBalance) external;
-    function emergencyWithdraw(address token, uint256 amount, address to) external;
-}
-
 // ============================================================================
-// CoordinatorFactory - 一站式发币编排（代币 + Pair + TaxProcessor + 分红 + 托管仓）
+// CoordinatorFactory - 一站式发币编排（代币 + Pair + TaxProcessor + 托管仓）
 // ============================================================================
 contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     TokenFactory public tokenFactory;
     PresaleFactory public presaleFactory;
     address public routerAddress;
-
-    /// @notice Dividend 实现合约（构造时注入；每代币按需克隆）
-    address public immutable dividendImplementation;
 
     bool public factoryEnabled = true;
     uint256 public creationFee = 0.005 ether; // 0.005 BNB = 5e15 wei
@@ -76,8 +60,6 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     mapping(address => address) public tokenCreators;
     /// @notice 代币 → 预售条款是否已配置：每仓仅允许一次 setupPresale（开售后底层条款冻结）
     mapping(address => bool) public tokenConfigured;
-    /// @notice 代币 → Dividend 实例（仅当分红通道 bps > 0 时部署）
-    mapping(address => address) public tokenDividends;
     mapping(address => address[]) public creatorTokens;
     address[] public allTokens;
 
@@ -105,16 +87,13 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     event ReservationFeeSet(uint256 fee);
     event FeesWithdrawn(uint256 amount, address indexed to);
     event TokenAddressReserved(address indexed token, address indexed reserver, uint256 fee);
-    event DividendCreated(address indexed token, address indexed dividend);
     event ExcessRefunded(address indexed to, uint256 amount);
 
-    constructor(address _tokenFactory, address _presaleFactory, address _router, address _dividendImplementation) {
-        if (_dividendImplementation == address(0)) revert DividendNotDeployed();
+    constructor(address _tokenFactory, address _presaleFactory, address _router) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         tokenFactory = TokenFactory(_tokenFactory);
         presaleFactory = PresaleFactory(_presaleFactory);
         routerAddress = _router;
-        dividendImplementation = _dividendImplementation;
     }
 
     modifier onlyAdmin() {
@@ -142,12 +121,6 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         if (bytes(tokenConfig.name).length == 0) revert EmptyTokenName();
         if (bytes(tokenConfig.symbol).length == 0) revert EmptyTokenSymbol();
 
-        // 四通道分配校验：合计必须恰好 10000（各项为 uint16 非负，合计约束即隐含单项 ≤ 100%）
-        if (
-            uint256(tokenConfig.marketBps) + tokenConfig.deflationBps + tokenConfig.dividendBps + tokenConfig.lpBps
-                != 10000
-        ) revert InvalidAllocationBps();
-
         // 步骤1: TokenFactory 部署克隆 + Pair + TaxProcessor
         //       salt != 0 时先校验预留权属：预测地址若已被他人锁定则拒绝兑现（本人/未预留放行）
         if (salt != bytes32(0)) {
@@ -161,35 +134,24 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         // 步骤2: 部署 TaxProcessor（部署者=本合约，保证 initialize 权限）
         address taxProcessor = address(new TaxProcessor());
 
-        // 步骤2b: 分红通道启用时部署 Dividend 克隆并初始化
-        //         owner = 本合约（平台托管管理权，与上游 Portal 持有模式一致）；
-        //         dividendToken = WBNB → 持有者 withdrawDividends 时自动解包为原生 BNB
-        address dividend = address(0);
-        if (tokenConfig.dividendBps > 0) {
-            dividend = Clones.clone(dividendImplementation);
-            IPlatformDividend(dividend).initialize(_wbnb(), token, tokenConfig.minHolderBalance);
-            tokenDividends[token] = dividend;
-            emit DividendCreated(token, dividend);
-        }
-
         // 步骤3: 初始化 V3 代币（msg.sender=本合约 → 全量代币铸给本合约）
-        IFlapTaxTokenV3(token).initialize(_buildInitParams(tokenConfig, bundle, taxProcessor, dividend));
+        IFlapTaxTokenV3(token).initialize(_buildInitParams(tokenConfig, bundle, taxProcessor));
 
-        // 步骤4: 初始化 TaxProcessor（平台不抽成：feeRate=0；四通道 bps 由创建者表单配置）
+        // 步骤4: 初始化 TaxProcessor（单通道：税 swap 成 BNB 即时转 feeRecipient，bps 全 0）
         ITaxProcessor(taxProcessor)
             .initialize(
                 TaxProcessorInitParams({
                 quoteToken: _wbnb(),
                 router: routerAddress,
                 feeReceiver: tokenConfig.feeRecipient,
-                marketAddress: tokenConfig.marketAddress,
-                dividendAddress: dividend,
+                marketAddress: address(0),
+                dividendAddress: address(0),
                 taxToken: token,
-                feeRate: 0, // 平台不抽成，四通道合计 100%
-                marketBps: tokenConfig.marketBps,
-                deflationBps: tokenConfig.deflationBps,
-                lpBps: tokenConfig.lpBps,
-                dividendBps: tokenConfig.dividendBps,
+                feeRate: 0,
+                marketBps: 0,
+                deflationBps: 0,
+                lpBps: 0,
+                dividendBps: 0,
                 dividendToken: address(0),
                 commissionReceiver: address(0),
                 commissionBps: 0,
@@ -290,8 +252,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     function _buildInitParams(
         TokenConfig memory tokenConfig,
         TokenFactory.TokenBundle memory bundle,
-        address taxProcessor,
-        address dividend
+        address taxProcessor
     ) internal view returns (IFlapTaxTokenV3.InitParams memory) {
         address[] memory pools = new address[](1);
         pools[0] = bundle.pair;
@@ -303,7 +264,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
             buyTax: tokenConfig.buyTax,
             sellTax: tokenConfig.sellTax,
             taxProcessor: taxProcessor,
-            dividendContract: dividend,
+            dividendContract: address(0), // 单通道模型：无 Dividend 实例
             quoteToken: _wbnb(),
             liqExpectedOutputAmount: tokenConfig.liqExpectedOutputAmount,
             taxDuration: tokenConfig.taxDuration,
@@ -371,40 +332,6 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         (bool success,) = msg.sender.call{value: balance}(new bytes(0));
         if (!success) revert WithdrawFailed();
         emit FeesWithdrawn(balance, msg.sender);
-    }
-
-    // ---------------------------------------------------------------------------
-    // 平台侧 Dividend 管理（owner = 本合约；透传给对应代币的 Dividend 实例）
-    // ---------------------------------------------------------------------------
-
-    modifier onlyDividend(address token) {
-        address dividend = tokenDividends[token];
-        if (dividend == address(0)) revert DividendNotDeployed();
-        _;
-    }
-
-    /// @notice 将某地址排除出指定代币的分红资格（如新池子、交易所地址）
-    function dividendExcludeAddress(address token, address account) external onlyAdmin onlyDividend(token) {
-        IPlatformDividend(tokenDividends[token]).excludeAddress(account);
-    }
-
-    /// @notice 恢复某地址的分红资格
-    function dividendUnexcludeAddress(address token, address account) external onlyAdmin onlyDividend(token) {
-        IPlatformDividend(tokenDividends[token]).unexcludeAddress(account);
-    }
-
-    /// @notice 调整分红资格最低持仓（代币 wei）
-    function dividendSetMinShareBalance(address token, uint256 minBalance) external onlyAdmin onlyDividend(token) {
-        IPlatformDividend(tokenDividends[token]).setMinimumShareBalance(minBalance);
-    }
-
-    /// @notice 紧急提取 Dividend 实例内滞留资产（token=address(0) 表示原生 BNB）
-    function dividendEmergencyWithdraw(address token, address asset, uint256 amount, address to)
-        external
-        onlyAdmin
-        onlyDividend(token)
-    {
-        IPlatformDividend(tokenDividends[token]).emergencyWithdraw(asset, amount, to);
     }
 
     // ---------------------------------------------------------------------------

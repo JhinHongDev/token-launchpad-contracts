@@ -26,17 +26,10 @@ struct TokenConfig {
     string meta; // 代币描述/元数据 IPFS CID（对齐 IFlapTaxTokenV3.InitParams.meta）
     uint16 buyTax; // 买税 bps（上限 MAX_TAX_BPS = 1000 即 10%）
     uint16 sellTax; // 卖税 bps（上限 MAX_TAX_BPS = 1000 即 10%）
-    address feeRecipient; // 兜底接收（TaxProcessor feeReceiver：swap 失败兜底 / 无分红实例时的分红兜底）
-    address marketAddress; // 创作者/营销资金钱包（marketing 通道接收方）
+    address feeRecipient; // 唯一税金收款人（税金清算 swap 成 BNB 后接收；也是各类失败路径的兜底接收）
     uint256 taxDuration; // 税持续时间（秒）
     uint256 antiFarmerDuration; // 防 farm 税持续时间（秒，<= taxDuration，支持 0）
     uint256 liqExpectedOutputAmount; // 清算参考输出（BNB wei，0 = 关闭方向调节）
-    // ── 税收四通道分配（bps，合计必须 = 10000，平台不抽成）──
-    uint16 marketBps; // 创作者/营销资金钱包通道
-    uint16 deflationBps; // 销毁通道（减少供应量）
-    uint16 dividendBps; // 分红通道（持有者奖励）
-    uint16 lpBps; // 流动性通道（增加流动性）
-    uint256 minHolderBalance; // 分红资格最低持仓（代币 wei，0 = 不设门槛）
 }
 
 contract TokenFactory is AccessControl {
@@ -54,7 +47,7 @@ contract TokenFactory is AccessControl {
         address pair;
     }
 
-    event TokenCreated(address indexed token, address indexed creator, address pair, address taxProcessor);
+    event TokenCreated(address indexed token, address indexed creator, address pair);
 
     constructor(address _flapImplementation, address _router, address _coordinator) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -89,7 +82,7 @@ contract TokenFactory is AccessControl {
         IPancakeRouter02 router = IPancakeRouter02(routerAddress);
         address pair = IPancakeFactory(router.factory()).createPair(token, router.WETH());
 
-        emit TokenCreated(token, tx.origin, pair, address(0));
+        emit TokenCreated(token, tx.origin, pair);
         return TokenBundle({token: token, pair: pair});
     }
 

@@ -17,7 +17,6 @@ import {
 } from "src/CoordinatorFactory.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {PRESALE} from "src/Presale.sol";
-import {Dividend} from "src/lib/dividend/Dividend.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 
 contract MockPairFactory {
@@ -90,13 +89,10 @@ contract TokenReservationTest is Test {
         pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
 
-        Dividend dividendImpl = new Dividend(address(0xAABB), address(0xdead));
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));
         PRESALE presaleTemplate = new PRESALE();
         presaleFactory = new PresaleFactory(address(presaleTemplate), address(0));
-        coordinator = new CoordinatorFactory(
-            address(tokenFactory), address(presaleFactory), address(router), address(dividendImpl)
-        );
+        coordinator = new CoordinatorFactory(address(tokenFactory), address(presaleFactory), address(router));
 
         tokenFactory.grantRole(tokenFactory.COORDINATOR_ROLE(), address(coordinator));
         presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(coordinator));
@@ -157,7 +153,7 @@ contract TokenReservationTest is Test {
         for (uint256 i = 0; i < entries.length; i++) {
             if (
                 entries[i].emitter == address(tokenFactory) && entries[i].topics.length >= 2
-                    && entries[i].topics[0] == keccak256("TokenCreated(address,address,address,address)")
+                    && entries[i].topics[0] == keccak256("TokenCreated(address,address,address)")
             ) {
                 evtToken = address(uint160(uint256(entries[i].topics[1])));
                 break;
@@ -418,15 +414,9 @@ contract TokenReservationTest is Test {
             buyTax: 300,
             sellTax: 500,
             feeRecipient: address(0xfee1),
-            marketAddress: address(0x9999),
             taxDuration: 7 days,
             antiFarmerDuration: 1 days,
-            liqExpectedOutputAmount: 0,
-            marketBps: 4000,
-            deflationBps: 2000,
-            dividendBps: 2000,
-            lpBps: 2000,
-            minHolderBalance: 0
+            liqExpectedOutputAmount: 0
         });
     }
 }
