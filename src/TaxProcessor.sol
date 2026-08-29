@@ -176,8 +176,10 @@ contract TaxProcessor is ITaxProcessor {
 
     /// @notice 派发 quote 给 feeReceiver：WETH 先解包原生 BNB 转账；
     ///         收款方拒收原生币（无 receive 的合约）时包回 WBNB 走 ERC20 转账
-    /// @dev CEI：totalQuoteSentToReceiver 先记账再外呼；原生转账收款方为发币时固定地址
-    // slither-disable-next-line reentrancy-eth
+    /// @dev CEI：totalQuoteSentToReceiver 先记账再外呼。原生转账收款方为发币时固定的 feeReceiver
+    ///      （唯一赋值链：CoordinatorFactory.initialize ← 表单 feeRecipient，双重非零校验，无 setter），
+    ///      非任意目的地 —— 压制 arbitrary-send-eth 误报
+    // slither-disable-next-line arbitrary-send-eth
     function _forwardQuote(uint256 amount) internal {
         totalQuoteSentToReceiver += amount;
 
