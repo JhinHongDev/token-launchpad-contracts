@@ -504,7 +504,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
         if (msg.sender == creator) share += creatorShare;
         if (share == 0) revert NoShare();
 
-        uint256 vested = _vestedOf(msg.sender, share);
+        uint256 vested = _vestedOf(share);
         uint256 claimable = vested - claimedTokens[msg.sender];
         if (claimable == 0) revert NothingToClaim();
 
@@ -537,10 +537,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
         uint256 unsold = presaleShare - totalSubscribedTokens; // launch 后为常值
         if (unsold == 0) revert NothingToClaim();
 
-        // 按 vesting 曲线分批释放（与创建者 30% 份额同一节奏）
-        uint256 periods = (block.timestamp - vestingStart) / vestingDelay;
-        uint256 vested = (unsold * vestingRate * periods) / 100;
-        if (vested > unsold) vested = unsold;
+        // 按 vesting 曲线分批释放（与创建者 30% 份额共用同一公式 _vestedOf）
+        uint256 vested = _vestedOf(unsold);
 
         uint256 amount = vested - unsoldWithdrawn;
         if (amount == 0) revert NothingToClaim();
@@ -601,7 +599,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
     // 工具 & 视图
     // ---------------------------------------------------------------------------
 
-    function _vestedOf(address user, uint256 share) internal view returns (uint256) {
+    function _vestedOf(uint256 share) internal view returns (uint256) {
         uint256 periods = (block.timestamp - vestingStart) / vestingDelay;
         uint256 vested = (share * vestingRate * periods) / 100;
         return vested > share ? share : vested;
@@ -615,7 +613,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
         if (user == creator) share += creatorShare;
         if (share == 0) return 0;
 
-        uint256 vested = _vestedOf(user, share);
+        uint256 vested = _vestedOf(share);
         uint256 claimed = claimedTokens[user];
         return vested > claimed ? vested - claimed : 0;
     }
