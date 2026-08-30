@@ -339,7 +339,8 @@ contract CoordinatorTest is Test {
             startTime: 0,
             vestingDelay: 7 days,
             vestingRate: 10,
-            slippage: 0
+            slippage: 0,
+            creatorBuyTokens: 0
         });
     }
 }

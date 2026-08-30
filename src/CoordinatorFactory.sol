@@ -38,6 +38,7 @@ error InsufficientReservationFee();
 error AddressAlreadyReserved();
 error AddressAlreadyDeployed();
 error NotReserver();
+error CreatorBuyTokensWithoutFunding();
 
 // ============================================================================
 // CoordinatorFactory - 一站式发币编排（代币 + Pair + TaxProcessor + 托管仓）
@@ -209,13 +210,18 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
 
     /// @dev 为已创建代币开启预售：份额 30% 创建者 / 20% 底池 / 50% 预售由合约写死计算，
     ///      仅价格/上限/vesting 等由创建者配置；token 所有权移交由创建者自行执行
-    ///      （供 launch() 编排 startMigration → 加池 → finalizeMigration → renounceOwnership）
-    function setupPresale(address token, PresaleConfig memory presaleConfig) external nonReentrant {
+    ///      （供 launch() 编排 startMigration → 加池 → 创建者购买 → finalizeMigration → renounceOwnership）
+    /// @dev msg.value 为创建者购买注资（可选）：0 = 不购买；> 0 且 creatorBuyTokens = 0 为 quote
+    ///      模式（花掉注资随行就市买入）；> 0 且 creatorBuyTokens > 0 为 token 模式（精确数量，超额退回）。
+    ///      此前本函数 non-payable，误发 value 直接 revert；现成为显式注资，误注可经 withdrawCreatorBuy 撤回。
+    function setupPresale(address token, PresaleConfig memory presaleConfig) external payable nonReentrant {
         address presale = tokenPresales[token];
         if (presale == address(0)) revert TokenNotRegistered();
         if (tokenCreators[token] != msg.sender) revert NotTokenCreator();
         if (tokenConfigured[token]) revert AlreadyConfigured(); // 条款一次性配置，与底层状态 0 冻结一致
         if (presaleConfig.presaleTokenPrice == 0) revert InvalidPrice();
+        // token 模式漏传资金 = 前端事故：显式报错，杜绝"以为买了、实际静默没买"
+        if (presaleConfig.creatorBuyTokens > 0 && msg.value == 0) revert CreatorBuyTokensWithoutFunding();
 
         tokenConfigured[token] = true;
 
@@ -245,6 +251,11 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         }
         // 每钱包认购上限必须为正：0 会导致 subscribe() 恒 revert，整单报废
         if (presaleConfig.maxBuyPerWallet == 0) revert InvalidMaxBuyPerWallet();
+
+        // 创建者购买注资（置于全部 setter 之后，保证 poolShare 已设置供上限校验）
+        if (msg.value > 0) {
+            p.fundCreatorBuy{value: msg.value}(presaleConfig.creatorBuyTokens);
+        }
 
         emit PresaleSetup(token, presale, creatorShare, poolShare, presaleShare);
     }

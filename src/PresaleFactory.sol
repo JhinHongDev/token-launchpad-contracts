@@ -24,6 +24,7 @@ struct PresaleConfig {
     uint256 vestingDelay;
     uint256 vestingRate;
     uint256 slippage;
+    uint256 creatorBuyTokens; // 创建者购买目标数量（wei）：0 = quote 模式（买多少 BNB）；BNB 金额由 setupPresale 的 msg.value 承载
 }
 
 contract PresaleFactory is AccessControl {

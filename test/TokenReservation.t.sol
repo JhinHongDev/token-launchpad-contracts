@@ -27,9 +27,18 @@ contract MockPairFactory {
     }
 }
 
+/// @dev 模拟 PancakeRouter02 子集：本合约同时扮演"池子"——加池时拉入的代币留存于此作为
+///      可卖储备（LP 凭证恒 1e18 仅作返回值），swap 按固定汇率 swapRate（tokens per BNB）成交，
+///      swapETHForExactTokens 复刻 PancakeSwap 找零行为（多余 ETH 退回调用方）
 contract MockRouterWithFactory {
     address public weth;
     MockPairFactory public pairFactory;
+
+    /// @notice 汇率：1 BNB 兑换的代币数量（wei），默认 2 亿枚/BNB（对齐开盘池 20% 份额形态）
+    uint256 public swapRate = 200_000_000 ether;
+
+    /// @notice 注入 swap 失败（测试 launch 的退币兜底路径）
+    bool public failSwap;
 
     constructor(address _weth, MockPairFactory _f) {
         weth = _weth;
@@ -44,18 +53,61 @@ contract MockRouterWithFactory {
         return address(pairFactory);
     }
 
-    function addLiquidityETH(address token, uint256 amountTokenDesired, uint256, uint256, address to, uint256)
+    function setSwapRate(uint256 rate) external {
+        swapRate = rate;
+    }
+
+    function setFailSwap(bool v) external {
+        failSwap = v;
+    }
+
+    function addLiquidityETH(address token, uint256 amountTokenDesired, uint256, uint256, address, uint256)
         external
         payable
         returns (uint256, uint256, uint256)
     {
-        IERC20Lite(token).transferFrom(msg.sender, to, amountTokenDesired);
+        // 代币留存本合约模拟池储备（LP 凭证为概念值）；msg.value（BNB 侧）同样留存
+        IERC20Lite(token).transferFrom(msg.sender, address(this), amountTokenDesired);
         return (amountTokenDesired, msg.value, 1e18);
+    }
+
+    /// @notice quote 模式路由：BNB 全额换入，按固定汇率发币
+    function swapExactETHForTokens(uint256, address[] calldata path, address to, uint256)
+        external
+        payable
+        returns (uint256[] memory amounts)
+    {
+        if (failSwap) revert("mock: swap failed");
+        uint256 out = (msg.value * swapRate) / 1e18;
+        IERC20Lite(path[1]).transfer(to, out);
+        amounts = new uint256[](2);
+        amounts[0] = msg.value;
+        amounts[1] = out;
+    }
+
+    /// @notice token 模式路由：精确数量发币，按汇率计算成本，找零退回调用方（复刻 PancakeSwap）
+    function swapETHForExactTokens(uint256 amountOut, address[] calldata path, address to, uint256)
+        external
+        payable
+        returns (uint256[] memory amounts)
+    {
+        if (failSwap) revert("mock: swap failed");
+        uint256 cost = (amountOut * 1e18) / swapRate;
+        if (cost == 0) cost = 1; // 向上取整语义：零成本视为最小单位
+        require(msg.value >= cost, "mock: insufficient input");
+        IERC20Lite(path[1]).transfer(to, amountOut);
+        // PancakeSwap 行为：多余的 ETH 原路退回调用方
+        (bool ok,) = msg.sender.call{value: msg.value - cost}("");
+        require(ok, "mock: refund failed");
+        amounts = new uint256[](2);
+        amounts[0] = cost;
+        amounts[1] = amountOut;
     }
 }
 
 interface IERC20Lite {
     function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function transfer(address to, uint256 value) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
 

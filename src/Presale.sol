@@ -43,6 +43,9 @@ error NoTokensToClaim();
 error NotAfterLaunch();
 error NoBNBToWithdraw();
 error SoftCapTooLow();
+error CreatorBuyTooLarge();
+error ZeroCreatorBuyValue();
+error CreatorBuyLocked();
 
 /// @notice 代币迁移操作接口（FlapTaxTokenV3 最小子集）
 interface ITokenMigration {
@@ -66,6 +69,12 @@ contract PRESALE is Ownable, ReentrancyGuard {
     uint256 private constant DEFAULT_SLIPPAGE = 500; // 5%
     uint256 public constant STATUS_FAILED = 4; // 发行失败终态：开放 refund()/reclaimTokens()
     address private constant LP_LOCK_ADDRESS = address(0xdead);
+
+    /// @notice 创建者购买上限：占开盘池代币份额的 25%（2 亿池 → 5000 万枚）。
+    /// @dev 买满上限的最坏边界：开盘价 ×1.78 以内、池深留存 75%、创建者即时筹码 5% 供应量、
+    ///      需等额于募集额 1/3 的 BNB；正常防抢跑使用（5-10% 池）远碰不到上限。
+    ///      买入的代币是创建者开盘唯一不锁仓的持仓，上限同时约束最大"砸盘弹药"。
+    uint256 public constant MAX_CREATOR_BUY_POOL_BPS = 2500;
 
     // BSC 测试网路由
     IPancakeRouter02 router;
@@ -115,6 +124,14 @@ contract PRESALE is Ownable, ReentrancyGuard {
     bool public liquidityAdded;
     uint256 public totalLPTokens; // 均为 0（LP 全部死锁黑洞，合约不持有）
 
+    // === 创建者购买（launch 内、加池后、税启动前原子执行）===
+    /// @dev 三态语义（主开关 = 注资额）：
+    ///      不购买：creatorBuyBnb == 0（fundCreatorBuy 从未被调用），launch 行为与历史完全一致
+    ///      quote 模式：creatorBuyBnb > 0 且 creatorBuyTokens == 0 —— 花 min(注资, 池BNB/3) 随行就市买入
+    ///      token 模式：creatorBuyBnb > 0 且 creatorBuyTokens > 0 —— 精确买入目标数量，超额自动退回
+    uint256 public creatorBuyBnb; // 注资余额（BNB wei）
+    uint256 public creatorBuyTokens; // 期望买入代币数（wei），0 = quote 模式
+
     // === 纯发币模式 ===
     bool public tokensClaimed;
 
@@ -147,6 +164,10 @@ contract PRESALE is Ownable, ReentrancyGuard {
     event PresaleFailed(uint256 raisedBNB, uint256 softCap);
     event Refunded(address indexed user, uint256 amount);
     event TokensReclaimed(address indexed owner, uint256 amount);
+    event CreatorBuyFunded(address indexed funder, uint256 bnbAmount, uint256 tokenTarget);
+    event CreatorBuyExecuted(uint256 bnbSpent, uint256 tokensBought);
+    event CreatorBuyRefunded(address indexed to, uint256 amount);
+    event CreatorBuyWithdrawn(address indexed to, uint256 amount);
 
     function initialize(address _owner, address _router) external {
         if (_initialized) revert AlreadyInitialized();
@@ -322,8 +343,16 @@ contract PRESALE is Ownable, ReentrancyGuard {
         }
         if (token.state() != IFlapTaxTokenV3.PoolState.Migrating) revert MigrationStateMismatch();
 
+        // 快照加池 BNB（_addLiquidity 会清零 accumulatedBNB；同时供创建者购买上限计算）
+        uint256 poolBnb = accumulatedBNB;
+
         // 步骤2: Migrating 状态加池（无税），LP 全部死锁 0xdead
-        _addLiquidity(poolShare, accumulatedBNB);
+        _addLiquidity(poolShare, poolBnb);
+
+        // 步骤2.5: 创建者购买 —— 必须在加池后（池子有钱可买）、finalizeMigration 前
+        //         （Migrating 态免税窗口：FoT 约束下"精确数量"模式仅此窗口可用，
+        //          税启动后 swapETHForExactTokens 会因到账量<期望量必然 revert）
+        if (creatorBuyBnb > 0) _executeCreatorBuy(poolBnb);
 
         // 步骤3: Migrating → TaxEnforcedAntiFarmer（税启动）
         token.finalizeMigration();
@@ -335,7 +364,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
         presaleStatus = 3;
         vestingStart = block.timestamp;
 
-        emit LaunchFinalized(accumulatedBNB, poolShare, block.timestamp);
+        // poolBnb 即加池前的实际募集额（原实现误读已清零的 accumulatedBNB，恒发 0）
+        emit LaunchFinalized(poolBnb, poolShare, block.timestamp);
     }
 
     // 仅被 launch()（nonReentrant）调用，无独立入口，无重入面
@@ -362,6 +392,103 @@ contract PRESALE is Ownable, ReentrancyGuard {
         accumulatedBNB = 0;
 
         emit LiquidityAdded(amountToken, amountETH, liquidity, LP_LOCK_ADDRESS);
+    }
+
+    // ---------------------------------------------------------------------------
+    // 创建者购买（注资随 setupPresale 携带，执行原子绑定在 launch 内：加池后、税启动前）
+    // ---------------------------------------------------------------------------
+
+    /// @notice 创建者购买注资（更新语义：写入新值后退回旧注资）
+    /// @param tokenTarget 期望买入代币数（wei）；0 = quote 模式（花掉注资随行就市买入）
+    /// @dev 仅未开盘（status != 3）可注资；token 模式上限 = poolShare × 25%（2 亿池 → 5000 万枚）。
+    ///      旧注资退 owner()：setupPresale 一次性调用保证 Coordinator 路径无旧款，
+    ///      owner 直接追加注资时 msg.sender == owner()，两路径落点一致。
+    function fundCreatorBuy(uint256 tokenTarget) external payable onlyOwnerOrConfigurator nonReentrant {
+        if (presaleStatus == 3) revert CreatorBuyLocked();
+        if (msg.value == 0) revert ZeroCreatorBuyValue();
+        if (tokenTarget > (poolShare * MAX_CREATOR_BUY_POOL_BPS) / BPS_DENOMINATOR) revert CreatorBuyTooLarge();
+
+        uint256 oldFunding = creatorBuyBnb;
+        creatorBuyBnb = msg.value;
+        creatorBuyTokens = tokenTarget;
+
+        if (oldFunding > 0) TransferHelper.safeTransferETH(owner(), oldFunding);
+        emit CreatorBuyFunded(msg.sender, msg.value, tokenTarget);
+    }
+
+    /// @notice 撤回创建者购买注资（未开盘任意状态可撤：认购中/待开盘/FAILED/纯发币）
+    /// @dev 开盘（status=3）后注资已被 launch 消费或退回，余额恒 0，天然封锁
+    function withdrawCreatorBuy() external onlyOwner nonReentrant {
+        if (presaleStatus == 3) revert CreatorBuyLocked();
+        uint256 amount = creatorBuyBnb;
+        if (amount == 0) revert NothingToClaim();
+
+        creatorBuyBnb = 0;
+        creatorBuyTokens = 0;
+        TransferHelper.safeTransferETH(msg.sender, amount);
+        emit CreatorBuyWithdrawn(msg.sender, amount);
+    }
+
+    /// @notice 开盘瞬间执行创建者购买（仅被 launch() 的 nonReentrant 上下文调用）
+    /// @param poolBnb 加池前的实际募集额（quote 模式花费上限的计算基数）
+    /// @dev 免税窗口：加池后、finalizeMigration 前（Migrating 态转账无税）——FoT 约束下
+    ///      token 模式的 swapETHForExactTokens 仅此窗口可用（税启动后到账量 < 期望量必 revert）。
+    ///      同 tx 原子执行：加池与买入之间无区块边界，抢跑者无法插队低价买入。
+    ///      创建者免 buyTax 语义：新单通道模型下税金本就回流创建者 feeRecipient，
+    ///      实际经济差异仅为 swap 损耗。任何失败路径全额退币，绝不阻塞开盘主流程。
+    // slither-disable-next-line reentrancy-eth 调用方 launch() 已 nonReentrant，状态在外呼前已清零
+    function _executeCreatorBuy(uint256 poolBnb) internal {
+        uint256 bnb = creatorBuyBnb;
+        uint256 target = creatorBuyTokens;
+        creatorBuyBnb = 0;
+        creatorBuyTokens = 0;
+
+        address[] memory path = new address[](2);
+        path[0] = router.WETH();
+        path[1] = coinAddress;
+
+        if (target > 0) {
+            // token 模式：精确买入 target 枚；PancakeSwap 路由自动将找零退回本合约（receive 兜收）
+            uint256 balanceBefore = address(this).balance;
+            try router.swapETHForExactTokens{value: bnb}(target, path, owner(), block.timestamp + 300) returns (
+                uint256[] memory amounts
+            ) {
+                // 找零 = 注资 - 实际花费（余额净变化为 -实际花费）
+                uint256 leftover = bnb + address(this).balance - balanceBefore;
+                emit CreatorBuyExecuted(amounts[0], amounts[1]);
+                _refundCreatorBuy(leftover);
+            } catch {
+                // 注资不足以按当前池价买到目标数量 → 全额退币，开盘继续
+                _refundCreatorBuy(bnb);
+            }
+        } else {
+            // quote 模式：随行就市花掉 spend；上限 = 池 BNB × bps/(10000-bps)，
+            // 恒定乘积下恰为买走 25% 池代币的花费，与 token 模式共用同一物理上界
+            uint256 maxSpend = (poolBnb * MAX_CREATOR_BUY_POOL_BPS) / (BPS_DENOMINATOR - MAX_CREATOR_BUY_POOL_BPS);
+            uint256 spend = bnb > maxSpend ? maxSpend : bnb;
+            // amountOutMin=0：同 tx 原子执行、池子流动性本交易刚建立、无夹击窗口
+            try router.swapExactETHForTokens{value: spend}(0, path, owner(), block.timestamp + 300) returns (
+                uint256[] memory amounts
+            ) {
+                emit CreatorBuyExecuted(spend, amounts[1]);
+                if (bnb > spend) _refundCreatorBuy(bnb - spend);
+            } catch {
+                _refundCreatorBuy(bnb);
+            }
+        }
+    }
+
+    /// @notice 创建者购买退币；失败不阻塞开盘（残留 BNB 由 withdrawRemainingBNB() 提取）
+    /// @dev 退币失败（owner 为拒收 BNB 的合约）若 revert 会永久卡死 launch，
+    ///      故此处有意用可失败的 low-level call；开盘后 owner 可经 withdrawRemainingBNB 取回
+    // slither-disable-next-line arbitrary-send-eth 收款方恒为 owner()（发币时确定的创建者），非任意目的地
+    function _refundCreatorBuy(uint256 amount) internal {
+        if (amount == 0) return;
+        (bool ok,) = owner().call{value: amount}("");
+        if (ok) {
+            emit CreatorBuyRefunded(owner(), amount);
+        }
+        // ok == false：BNB 留存合约余额，withdrawRemainingBNB() 是既有的既定出口
     }
 
     // ---------------------------------------------------------------------------
