@@ -107,8 +107,9 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     // ---------------------------------------------------------------------------
 
     /// @dev 创建代币（FlapTaxTokenV3 克隆）+ Pair + TaxProcessor + 托管仓（PRESALE 克隆）。
-    ///      代币全量存入托管仓，token 所有权归创建者；预售为可选步骤（见 setupPresale）。
-    ///      - 不开预售：创建者 claimAllTokens() 一次性领取全部代币
+    ///      代币全量存入托管仓；token 所有权交托管仓（迁移编排前提），托管仓所有权归创建者；
+    ///      预售为可选步骤（见 setupPresale）。
+    ///      - 不开预售：创建者 claimAllTokens() 一次性领取全部代币，同笔完成迁移（领取即上线）
     ///      - 开预售： 调用 setupPresale() 配置 30% 创建者 / 20% 底池 / 50% 预售
     ///      - salt == 0：默认随机地址；salt != 0：CREATE2 确定性地址，须为本人预留的预言地址
     function createToken(TokenConfig memory tokenConfig, bytes32 salt)
@@ -171,9 +172,10 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         bool transferOk = IERC20(token).transfer(presale, supply);
         if (!transferOk) revert TokenTransferFailed();
 
-        // 步骤6: 授权协调器为配置方（供 setupPresale 配置），再将所有权交付创建者
+        // 步骤6: 授权协调器为配置方（供 setupPresale 配置）；token 所有权交托管仓
+        //       （claimAllTokens/reclaimTokens/launch 的迁移编排前提），托管仓所有权交付创建者
         PRESALE(payable(presale)).setConfigurator(address(this));
-        ITokenMigration(token).transferOwnership(msg.sender);
+        ITokenMigration(token).transferOwnership(presale);
         PRESALE(payable(presale)).transferOwnership(msg.sender);
         emit OwnershipTransferred(token, presale, msg.sender);
 
@@ -209,8 +211,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     }
 
     /// @dev 为已创建代币开启预售：份额 30% 创建者 / 20% 底池 / 50% 预售由合约写死计算，
-    ///      仅价格/上限/vesting 等由创建者配置；token 所有权移交由创建者自行执行
-    ///      （供 launch() 编排 startMigration → 加池 → 创建者购买 → finalizeMigration → renounceOwnership）
+    ///      仅价格/上限/vesting 等由创建者配置；token 所有权在 createToken 时已交托管仓
+    ///      （launch() 直接编排 startMigration → 加池 → 创建者购买 → finalizeMigration → renounceOwnership）
     /// @dev msg.value 为创建者购买注资（可选）：0 = 不购买；> 0 且 creatorBuyTokens = 0 为 quote
     ///      模式（花掉注资随行就市买入）；> 0 且 creatorBuyTokens > 0 为 token 模式（精确数量，超额退回）。
     ///      此前本函数 non-payable，误发 value 直接 revert；现成为显式注资，误注可经 withdrawCreatorBuy 撤回。

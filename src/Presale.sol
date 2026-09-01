@@ -58,12 +58,15 @@ interface ITokenMigration {
 }
 
 /// @title PRESALE — Launchpad 分配/认购/锁仓/加池/迁移编排合约
-/// @dev 两种模式：
-///     - 纯发币模式（presaleEnabled=false）：全部代币存入本合约，创建者通过 claimAllTokens 一次性领取
+/// @dev 两种模式（迁移编排统一由合约代办，用户全程无需接触状态机）：
+///     - 纯发币模式（presaleEnabled=false）：claimAllTokens() 一次性领取全部代币，同笔交易内完成
+///       迁移三步 + renounceOwnership —— 领取即上线，此后创建者可自由分发或去 DEX 加池/交易
+///       （入池与否、数量、时机均由创建者决定）
 ///     - 预售模式（presaleEnabled=true）：30% 创建者 / 20% 底池 / 50% 预售，散户 BNB 认购代币份额，
 ///       launch() 自动完成 startMigration → 加池(LP 死锁 0xdead) → finalizeMigration → renounceOwnership
 ///     - 失败终态（STATUS_FAILED=4）：endPresale 时未达 softCap 则宣告发行失败，散户经 refund()
-///       精确取回缴款、创建者经 reclaimTokens() 回收代币，其余功能全部封锁
+///       精确取回缴款、创建者经 reclaimTokens() 回收代币（同样内嵌迁移，不残留锁池状态），其余功能全部封锁
+///     迁移前提：token 所有权自 createToken 起在本合约（迁移函数仅 owner 可调），各出口完成时 renounce。
 contract PRESALE is Ownable, ReentrancyGuard {
     uint256 private constant BPS_DENOMINATOR = 10000;
     uint256 private constant DEFAULT_SLIPPAGE = 500; // 5%
@@ -394,6 +397,22 @@ contract PRESALE is Ownable, ReentrancyGuard {
         emit LiquidityAdded(amountToken, amountETH, liquidity, LP_LOCK_ADDRESS);
     }
 
+    /// @notice 完整迁移并放弃 token 所有权：BondingCurve → Migrating → TaxEnforcedAntiFarmer → renounce
+    /// @dev 与 launch() 同构的迁移编排（无加池/创建者购买插入），供纯发币出口
+    ///      （claimAllTokens/reclaimTokens）复用；状态逐步严格校验，任何偏差整笔回滚（迁移不可半途）
+    function _migrateAndRenounce() internal {
+        ITokenMigration token = ITokenMigration(coinAddress);
+
+        if (token.state() != IFlapTaxTokenV3.PoolState.BondingCurve) revert MigrationStateMismatch();
+        token.startMigration();
+        if (token.state() != IFlapTaxTokenV3.PoolState.Migrating) revert MigrationStateMismatch();
+        token.finalizeMigration();
+        if (token.state() != IFlapTaxTokenV3.PoolState.TaxEnforcedAntiFarmer) revert MigrationStateMismatch();
+
+        // 放弃 token 所有权（迁移完成后权限已无用）
+        token.renounceOwnership();
+    }
+
     // ---------------------------------------------------------------------------
     // 创建者购买（注资随 setupPresale 携带，执行原子绑定在 launch 内：加池后、税启动前）
     // ---------------------------------------------------------------------------
@@ -515,15 +534,20 @@ contract PRESALE is Ownable, ReentrancyGuard {
         emit VestingClaimed(msg.sender, claimable, block.timestamp);
     }
 
-    /// @notice 纯发币模式领取：全部代币一次性给创建者
+    /// @notice 纯发币模式领取：全部代币一次性给创建者，同笔完成迁移并放弃 token 所有权
+    /// @dev 领取即上线：迁移终点 TaxEnforcedAntiFarmer（买卖税按发币配置即时生效）、token owner 归零。
+    ///      此后创建者可自由分发，或随时去 Pancake 以标准流程（approve + addLiquidityETH）加池交易。
     function claimAllTokens() external onlyOwner nonReentrant {
         if (presaleEnabled) revert PresaleDisabled();
         if (tokensClaimed) revert TokensAlreadyClaimed();
+        if (coinAddress == address(0)) revert TokenNotSet();
 
         uint256 balance = IERC20(coinAddress).balanceOf(address(this));
         if (balance == 0) revert NoTokensToClaim();
 
         tokensClaimed = true;
+        _migrateAndRenounce();
+
         TransferHelper.safeTransfer(coinAddress, msg.sender, balance);
         emit AllTokensClaimed(msg.sender, balance, block.timestamp);
     }
@@ -581,12 +605,16 @@ contract PRESALE is Ownable, ReentrancyGuard {
     }
 
     /// @notice 失败结算后创建者收回托管仓内剩余代币（散户从未取得代币，全量退回即守恒）
+    /// @dev 与 claimAllTokens 同口径内嵌迁移 + renounce：失败回收不残留 BondingCurve 锁池问题
     function reclaimTokens() external onlyOwner nonReentrant {
         if (presaleStatus != STATUS_FAILED) revert InvalidStatus();
         if (coinAddress == address(0)) revert TokenNotSet();
 
+        // 余额前置：空仓先以 NoTokensToClaim 拒绝（迁移前置校验不可先跑，否则二次回收报错错位）
         uint256 balance = IERC20(coinAddress).balanceOf(address(this));
         if (balance == 0) revert NoTokensToClaim();
+
+        _migrateAndRenounce();
 
         TransferHelper.safeTransfer(coinAddress, msg.sender, balance);
         emit TokensReclaimed(msg.sender, balance);

@@ -244,8 +244,6 @@ contract CreatorBuyTest is Test {
         coordinator.setupPresale{value: 0.1 ether}(tokenAddr, _cfgWith(0, 5 ether)); // 软顶抬高制造失败
 
         vm.prank(creator);
-        FlapTaxTokenV3(tokenAddr).transferOwnership(address(sale));
-        vm.prank(creator);
         sale.openPresale();
         vm.prank(alice);
         sale.subscribe{value: 1 ether}();
@@ -331,7 +329,7 @@ contract CreatorBuyTest is Test {
         return cfg;
     }
 
-    /// @dev 标准全流程：注资 setupPresale → 移交 token 所有权 → 认购 1 BNB → 收官 → 开盘
+    /// @dev 标准全流程：注资 setupPresale → 认购 1 BNB → 收官 → 开盘
     function _runToLaunch(uint256 fundValue, uint256 target, uint256 softCap) internal {
         _runToPreLaunch(fundValue, target, softCap);
         _launch();
@@ -348,10 +346,9 @@ contract CreatorBuyTest is Test {
         _launchFlow();
     }
 
-    /// @dev 从"已 setupPresale"状态跑到开盘（移交所有权 → 开认购 → 认购 1 BNB → 收官 → 开盘）
+    /// @dev 从"已 setupPresale"状态跑到开盘（开认购 → 认购 1 BNB → 收官 → 待开盘；
+    ///      token 所有权已由 createToken 交托管仓，launch 直接可编排）
     function _launchFlow() internal {
-        vm.prank(creator);
-        FlapTaxTokenV3(tokenAddr).transferOwnership(address(sale));
         vm.prank(creator);
         sale.openPresale();
         vm.prank(alice);

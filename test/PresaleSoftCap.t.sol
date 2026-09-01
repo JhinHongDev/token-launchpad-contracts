@@ -241,6 +241,9 @@ contract PresaleSoftCapTest is Test {
         presale.reclaimTokens();
         assertEq(token.balanceOf(address(this)), before + SUPPLY);
         assertEq(token.balanceOf(address(presale)), 0);
+        // 失败回收同口径内嵌迁移：无锁池残留、token 无主
+        assertEq(uint8(token.state()), uint8(IFlapTaxTokenV3.PoolState.TaxEnforcedAntiFarmer));
+        assertEq(token.owner(), address(0));
 
         vm.expectRevert(NoTokensToClaim.selector);
         presale.reclaimTokens();

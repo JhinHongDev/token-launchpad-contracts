@@ -5,7 +5,7 @@ pragma solidity ^0.8.13;
 import {Test, console2} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
-import {PRESALE, NothingToClaim} from "src/Presale.sol";
+import {PRESALE, NothingToClaim, TokensAlreadyClaimed} from "src/Presale.sol";
 
 interface IERC20Sim {
     function transfer(address to, uint256 value) external returns (bool);
@@ -158,10 +158,24 @@ contract LaunchpadTest is Test {
         p.configureLaunch(false, address(0), 0, 0, 0);
         p.setCoinAndPair(address(token2), pair);
         token2.transfer(address(p), SUPPLY);
+        token2.transferOwnership(address(p)); // createToken 时所有权即交托管仓
 
         p.claimAllTokens();
         assertEq(token2.balanceOf(address(this)), SUPPLY);
         assertEq(p.tokensClaimed(), true);
+
+        // 领取即上线：迁移三步 + renounce 同笔完成，税按发币配置即时生效
+        assertEq(uint8(token2.state()), uint8(IFlapTaxTokenV3.PoolState.TaxEnforcedAntiFarmer));
+        assertEq(token2.owner(), address(0));
+
+        // 池转账解锁：BondingCurve 拦截不复存在；转池按卖向计税（sellTax 500 bps）
+        token2.transfer(pair, 100 ether);
+        assertEq(token2.balanceOf(pair), 95 ether);
+        assertEq(token2.balanceOf(address(token2)), 5 ether, "sell tax accrued in tax vault");
+
+        // 出口封闭：二次领取拒绝
+        vm.expectRevert(TokensAlreadyClaimed.selector);
+        p.claimAllTokens();
     }
 
     // 无论测试台如何使用，合约必须能接收 BNB（MockRouter addLiquidityETH 等场景）

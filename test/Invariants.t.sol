@@ -121,9 +121,7 @@ contract Handler {
         address token = tokens[tokenIdx % tokens.length];
         PRESALE p = PRESALE(payable(ghostPresale[token]));
         if (p.presaleStatus() != 2) return;
-        // 真实用户旅程：创建者先把 token 所有权移交托管仓（前端步骤），launch 才能编排迁移
-        vm.prank(p.owner());
-        FlapTaxTokenV3(token).transferOwnership(address(p));
+        // token 所有权已由 createToken 交托管仓，launch 直接可编排迁移
         _trackExit(token, p, p.owner(), 0);
     }
 

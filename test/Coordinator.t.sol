@@ -94,17 +94,34 @@ contract CoordinatorTest is Test {
     }
 
     function test_CreateTokenOnlyNoPresaleSetup() public {
-        // createToken 后：代币在托管仓、所有权在创建者、预售未配置
+        // createToken 后：代币在托管仓、token 所有权在托管仓（迁移编排前提）、预售未配置
         address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
         address presale = coordinator.getTokenPresale(token);
         assertTrue(presale != address(0));
 
         assertEq(IERC20Lite(token).balanceOf(presale), SUPPLY);
-        assertEq(FlapTaxTokenV3(token).owner(), creator); // token owner = 创建者
+        assertEq(FlapTaxTokenV3(token).owner(), presale); // token owner = 托管仓
         assertEq(PRESALE(payable(presale)).creator(), address(0)); // 未配置预售
         (bool enabled,,,,,) = PRESALE(payable(presale)).getLaunchStatus();
         assertEq(enabled, false);
         assertEq(PRESALE(payable(presale)).presaleStatus(), 0);
+    }
+
+    /// @dev 纯发币模式端到端：createToken（不 setupPresale）→ claimAllTokens 领取即上线
+    function test_NoPresaleClaimMigratesAndUnlocks() public {
+        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
+        address presale = coordinator.getTokenPresale(token);
+        PRESALE p = PRESALE(payable(presale));
+
+        vm.prank(creator);
+        p.claimAllTokens();
+
+        // 一笔交易内：迁移三步 + renounce + 全量代币发放全部完成
+        assertEq(uint8(FlapTaxTokenV3(token).state()), uint8(IFlapTaxTokenV3.PoolState.TaxEnforcedAntiFarmer));
+        assertEq(FlapTaxTokenV3(token).owner(), address(0)); // token 所有权已放弃
+        assertTrue(p.tokensClaimed());
+        assertEq(IERC20Lite(token).balanceOf(presale), 0); // 托管仓清空
+        assertEq(IERC20Lite(token).balanceOf(creator), SUPPLY); // 创建者持有全量
     }
 
     function test_SetupPresaleThenFullFlow() public {
@@ -116,11 +133,7 @@ contract CoordinatorTest is Test {
         vm.prank(creator);
         coordinator.setupPresale(token, cfg);
 
-        // 创建者自行移交 token 所有权（setupPresale 只配置，不移交）
-        vm.prank(creator);
-        FlapTaxTokenV3(token).transferOwnership(presale);
-
-        // token 所有权已移交托管仓（供 launch 编排）
+        // token 所有权在 createToken 时已交托管仓（供 launch 编排）
         assertEq(FlapTaxTokenV3(token).owner(), presale);
         assertEq(PRESALE(payable(presale)).presaleEnabled(), true);
 
