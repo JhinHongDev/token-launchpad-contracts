@@ -14,7 +14,7 @@ import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReserva
 ///      回归点 1：claimAllTokens（抽干托管仓）后不可再 configureLaunch 重开预售 → 防 exit scam
 ///      回归点 2：openPresale 终检 softCap >= minLiquidityAmount → 防配置顺序绕过导致 status 2 死锁
 contract PresaleSecurityTest is Test {
-    uint256 constant SUPPLY = 1e9 ether;
+    uint256 constant SUPPLY = 1e6 ether;
 
     MockRouterWithFactory router;
     TokenFactory tokenFactory;
@@ -26,7 +26,7 @@ contract PresaleSecurityTest is Test {
     address victim = address(0xBEEF);
 
     function setUp() public {
-        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
+        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));

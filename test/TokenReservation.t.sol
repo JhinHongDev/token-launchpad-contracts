@@ -35,7 +35,7 @@ contract MockRouterWithFactory {
     MockPairFactory public pairFactory;
 
     /// @notice 汇率：1 BNB 兑换的代币数量（wei），默认 2 亿枚/BNB（对齐开盘池 20% 份额形态）
-    uint256 public swapRate = 200_000_000 ether;
+    uint256 public swapRate = 200_000 ether;
 
     /// @notice 注入 swap 失败（测试 launch 的退币兜底路径）
     bool public failSwap;
@@ -117,7 +117,7 @@ interface IERC20Lite {
 ///         紧随其后的 vm.expectRevert 预期；
 ///      2) 事件断言走 vm.recordLogs 全量扫描，不做"镜像 emit 紧贴 target call"的位置敏感匹配。
 contract TokenReservationTest is Test {
-    uint256 constant SUPPLY = 1e9 ether;
+    uint256 constant SUPPLY = 1e6 ether;
     // 低 20 bit == 最后五个十六进制位；0x88888 即五连 8
     uint160 constant VANITY_88888 = 0x88888;
     bytes32 constant RESERVE_TOPIC = keccak256("TokenAddressReserved(address,address,uint256)");
@@ -137,7 +137,7 @@ contract TokenReservationTest is Test {
     address nonAdmin = address(0xAAA1);
 
     function setUp() public {
-        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
+        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
         pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
 

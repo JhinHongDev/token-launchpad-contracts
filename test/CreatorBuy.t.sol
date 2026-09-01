@@ -20,11 +20,11 @@ import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReserva
 /// @title 创建者代币购买（Creator Buy）测试
 /// @dev 核心链路：setupPresale{value} 注资 → 认购 → endPresale → launch 内
 ///      （加池后、税启动前的 Migrating 免税窗口）原子买入 → 代币即时到账 creator。
-///      mock 汇率恒 2 亿枚/BNB，精确断言即隐含验证免税（有税则到账必然少于换出额）。
+///      mock 汇率恒 20 万枚/BNB，精确断言即隐含验证免税（有税则到账必然少于换出额）。
 contract CreatorBuyTest is Test {
-    uint256 constant SUPPLY = 1e9 ether;
-    uint256 constant POOL_SHARE = 2e8 ether; // 20% 底池份额 = 2 亿枚
-    uint256 constant MAX_BUY = 5e7 ether; // poolShare × 25% = 5000 万枚上限
+    uint256 constant SUPPLY = 1e6 ether;
+    uint256 constant POOL_SHARE = 2e5 ether; // 20% 底池份额 = 20 万枚
+    uint256 constant MAX_BUY = 5e4 ether; // poolShare × 25% = 5 万枚上限
 
     // 结构性镜像合约事件，供 vm.expectEmit 按 topic 匹配
     event LaunchFinalized(uint256 bnbAmount, uint256 tokenAmount, uint256 timestamp);
@@ -43,7 +43,7 @@ contract CreatorBuyTest is Test {
     PRESALE sale;
 
     function setUp() public {
-        flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
+        flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
 
@@ -89,30 +89,30 @@ contract CreatorBuyTest is Test {
         _runToPreLaunch(0.1 ether, 0, 0.5 ether);
 
         vm.expectEmit(false, false, false, true, address(sale));
-        emit CreatorBuyExecuted(0.1 ether, 2e7 ether);
+        emit CreatorBuyExecuted(0.1 ether, 2e4 ether);
         _launch();
 
-        // 免税窗口买入：0.1 BNB × 2亿/BNB 汇率 = 2000 万枚，精确到账即证明无税
-        assertEq(IERC20Lite(tokenAddr).balanceOf(creator), 2e7 ether);
+        // 免税窗口买入：0.1 BNB × 20万/BNB 汇率 = 2 万枚，精确到账即证明无税
+        assertEq(IERC20Lite(tokenAddr).balanceOf(creator), 2e4 ether);
         assertEq(creator.balance, bnbBefore - 0.1 ether, "spent exactly the funding");
         assertEq(sale.creatorBuyBnb(), 0);
 
         // 即时到账：开盘后立即可转账（不进 vesting）
         vm.prank(creator);
-        IERC20Lite(tokenAddr).transfer(alice, 1e6 ether);
-        assertEq(IERC20Lite(tokenAddr).balanceOf(alice), 1e6 ether);
+        IERC20Lite(tokenAddr).transfer(alice, 1e3 ether);
+        assertEq(IERC20Lite(tokenAddr).balanceOf(alice), 1e3 ether);
     }
 
     function test_TokenModeExactAmountPlusRefund() public {
         uint256 bnbBefore = creator.balance;
-        _runToPreLaunch(1 ether, 5e6 ether, 0.5 ether);
+        _runToPreLaunch(1 ether, 5e3 ether, 0.5 ether);
 
-        // 目标 500 万枚：成本 0.025 BNB，注资 1 BNB，找零 0.975 BNB 自动退回
+        // 目标 5000 枚：成本 0.025 BNB，注资 1 BNB，找零 0.975 BNB 自动退回
         vm.expectEmit(true, true, true, true, address(sale));
         emit CreatorBuyRefunded(creator, 0.975 ether);
         _launch();
 
-        assertEq(IERC20Lite(tokenAddr).balanceOf(creator), 5e6 ether, "exact token amount");
+        assertEq(IERC20Lite(tokenAddr).balanceOf(creator), 5e3 ether, "exact token amount");
         assertEq(creator.balance, bnbBefore - 0.025 ether, "only actual cost deducted");
         assertEq(sale.creatorBuyBnb(), 0);
     }
@@ -135,7 +135,7 @@ contract CreatorBuyTest is Test {
     }
 
     function test_RevertWhen_TargetExceedsCap() public {
-        PresaleConfig memory cfg = _cfgWith(MAX_BUY + 1, 0.5 ether); // 5000 万 + 1 wei
+        PresaleConfig memory cfg = _cfgWith(MAX_BUY + 1, 0.5 ether); // 5 万 + 1 wei
         uint256 val = 1 ether;
         vm.prank(creator);
         vm.expectRevert(CreatorBuyTooLarge.selector);
@@ -145,7 +145,7 @@ contract CreatorBuyTest is Test {
     function test_RevertWhen_TokensWithoutFunding() public {
         vm.prank(creator);
         vm.expectRevert(CreatorBuyTokensWithoutFunding.selector);
-        coordinator.setupPresale(tokenAddr, _cfgWith(1e6 ether, 0.5 ether));
+        coordinator.setupPresale(tokenAddr, _cfgWith(1e3 ether, 0.5 ether));
     }
 
     // -------------------------------------------------------------------------
@@ -167,9 +167,9 @@ contract CreatorBuyTest is Test {
     }
 
     function test_TokenModeInsufficientFundingRefunds() public {
-        // 目标 500 万枚成本 0.025 BNB，仅注资 0.01 → swap 失败 → 全额退币开盘继续
+        // 目标 5000 枚成本 0.025 BNB，仅注资 0.01 → swap 失败 → 全额退币开盘继续
         uint256 bnbBefore = creator.balance;
-        _runToLaunch(0.01 ether, 5e6 ether, 0.5 ether);
+        _runToLaunch(0.01 ether, 5e3 ether, 0.5 ether);
 
         assertEq(sale.presaleStatus(), 3);
         assertEq(IERC20Lite(tokenAddr).balanceOf(creator), 0);
@@ -182,10 +182,10 @@ contract CreatorBuyTest is Test {
 
     function test_FundingViaCoordinatorReachesPresale() public {
         vm.prank(creator);
-        coordinator.setupPresale{value: 0.3 ether}(tokenAddr, _cfgWith(1e6 ether, 0.5 ether));
+        coordinator.setupPresale{value: 0.3 ether}(tokenAddr, _cfgWith(1e3 ether, 0.5 ether));
 
         assertEq(sale.creatorBuyBnb(), 0.3 ether);
-        assertEq(sale.creatorBuyTokens(), 1e6 ether);
+        assertEq(sale.creatorBuyTokens(), 1e3 ether);
     }
 
     function test_RefundPreviousOnRefund() public {
@@ -203,7 +203,7 @@ contract CreatorBuyTest is Test {
 
     function test_WithdrawBeforeLaunch() public {
         vm.prank(creator);
-        coordinator.setupPresale{value: 0.1 ether}(tokenAddr, _cfgWith(2e6 ether, 0.5 ether));
+        coordinator.setupPresale{value: 0.1 ether}(tokenAddr, _cfgWith(2e3 ether, 0.5 ether));
 
         uint256 bnbBefore = creator.balance;
         vm.prank(creator);
@@ -313,7 +313,7 @@ contract CreatorBuyTest is Test {
     function _presaleConfig(uint256 softCap) internal pure returns (PresaleConfig memory) {
         return PresaleConfig({
             presaleTokenPrice: 1e15,
-            maxBuyPerWallet: 1e8 ether,
+            maxBuyPerWallet: 1e5 ether,
             hardcap: 0,
             minLiquidityAmount: 0.1 ether,
             softCap: softCap,

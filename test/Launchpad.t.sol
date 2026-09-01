@@ -35,7 +35,7 @@ contract DummyTaxProcessor {}
 
 contract LaunchpadTest is Test {
     address constant LP_DEAD = address(0xdead);
-    uint256 constant SUPPLY = 1e9 ether; // FlapTaxTokenV3 maxSupply
+    uint256 constant SUPPLY = 1e6 ether; // FlapTaxTokenV3 maxSupply
 
     FlapTaxTokenV3 token;
     PRESALE presale;
@@ -169,7 +169,7 @@ contract LaunchpadTest is Test {
 
     function _freshToken() internal returns (FlapTaxTokenV3) {
         // EIP-1167 克隆（构造函数不执行，initialize 可用）
-        FlapTaxTokenV3 impl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
+        FlapTaxTokenV3 impl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
         FlapTaxTokenV3 t = FlapTaxTokenV3(payable(_clone(address(impl))));
 
         address[] memory pools = new address[](1);

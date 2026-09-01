@@ -45,7 +45,7 @@ contract FlapTaxTokenV3 is Initializable, ERC20PermitUpgradeable, OwnableUpgrade
     uint256 public immutable START_LIQ_THRESHOLD;
 
     /// @notice The maximum supply of the token
-    uint256 public constant maxSupply = 1e9 ether; // 1 billion tokens
+    uint256 public constant maxSupply = 1e6 ether; // TEST scale: 1M tokens — 主网部署前必须恢复 1e9 ether（连带 Deploy 脚本与测试的阈值参数）
 
     /// @notice The address of the Uniswap/PancakeSwap V2 router contract
     address public v2Router;

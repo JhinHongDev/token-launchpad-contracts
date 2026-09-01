@@ -58,7 +58,7 @@ interface IERC20Lite {
 }
 
 contract CoordinatorTest is Test {
-    uint256 constant SUPPLY = 1e9 ether;
+    uint256 constant SUPPLY = 1e6 ether;
 
     // 结构性镜像合约事件，供 vm.expectEmit 按 topic 匹配
     event PresaleFailed(uint256 raisedBNB, uint256 softCap);
@@ -74,7 +74,7 @@ contract CoordinatorTest is Test {
     address feeReceiver = address(0xfee1);
 
     function setUp() public {
-        flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
+        flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
         pairFactory = new MockPairFactory();
         pairFactory.pair();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);

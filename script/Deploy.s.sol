@@ -16,8 +16,8 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
 
-        // FlapTaxTokenV3 实现：MIN=0.5% 供应量(5e6 ether)，START=1%(1e7 ether)
-        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
+        // FlapTaxTokenV3 实现：MIN=0.5% 供应量(5e3 ether)，START=1%(1e4 ether) — 测试期缩放，主网前恢复 5e6/1e7
+        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
 
         // 工厂与 Coordinator 存在循环引用：先建工厂（coordinator 占位 0），建好 Coordinator 后授权
         TokenFactory tokenFactory = new TokenFactory(address(flapImpl), ROUTER, address(0));
