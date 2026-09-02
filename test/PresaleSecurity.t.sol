@@ -5,7 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
 import {CoordinatorFactory, PresaleConfig} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
-import {PRESALE, PresaleNotOpen, PresaleDisabled, TokensAlreadyClaimed, SoftCapTooLow, ZeroMinLiquidity} from "src/Presale.sol";
+import {
+    PRESALE,
+    PresaleNotOpen,
+    PresaleDisabled,
+    TokensAlreadyClaimed,
+    SoftCapTooLow,
+    ZeroMinLiquidity
+} from "src/Presale.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
