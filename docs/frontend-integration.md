@@ -185,7 +185,7 @@ struct PresaleConfig {
     uint256 softCap;              // 认购成功线（BNB wei）：endPresale 时未达 → 发行失败开退款。
                                   //   必须且会被校验 ≥ minLiquidityAmount
     uint256 startTime;            // 认购开始时间戳（秒），0 = 立即
-    uint256 vestingDelay;         // vesting 周期长度（秒）：7 天 ≤ x ≤ 90 天
+    uint256 vestingDelay;         // vesting 周期长度（秒）：testnet 分支 1 分钟 ≤ x ≤ 90 天（主网口径 7 天）
     uint256 vestingRate;          // 每周期释放百分比：5 ≤ x ≤ 20
     uint256 slippage;             // 加池滑点保护 bps，0 ≤ x ≤ 1000（0 = 用默认 5%）
     uint256 creatorBuyTokens;     // 创建者购买目标（代币 wei）；0 = quote 模式（花掉全部注资随行就市）
@@ -201,7 +201,7 @@ struct PresaleConfig {
 | `maxBuyPerWallet` | > 0 | `InvalidMaxBuyPerWallet` |
 | `minLiquidityAmount` | > 0 | `ZeroMinLiquidity` |
 | `softCap` | ≥ `minLiquidityAmount` | `SoftCapTooLow` |
-| `vestingDelay` | 7 days ~ 90 days | `InvalidVestingDelay` |
+| `vestingDelay` | 1 分钟 ~ 90 天（testnet 分支标定；主网口径 7 天） | `InvalidVestingDelay` |
 | `vestingRate` | 5 ~ 20 | `InvalidVestingRate` |
 | `slippage` | ≤ 1000 | `SlippageTooHigh` |
 | `creatorBuyTokens` > 0 时 | 注资 msg.value > 0 | `CreatorBuyTokensWithoutFunding` |

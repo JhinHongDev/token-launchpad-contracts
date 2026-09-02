@@ -249,13 +249,15 @@ contract PRESALE is Ownable, ReentrancyGuard {
         emit PresaleTermsSet(_tokenPrice, _maxTokens, _maxBuyPerWallet, _hardcap, _minLiquidity, _startTime);
     }
 
-    /// @notice 设置 vesting 释放节奏（vesting 恒开启；Delay 7-90天 / Rate 5-20%）
+    /// @notice 设置 vesting 释放节奏（vesting 恒开启；Rate 5-20%）
+    /// @dev testnet 分支标定：Delay 下限放宽至 1 分钟（测试阶段联调）；
+    ///      主网口径为 7 天（main 分支），若合回须同步恢复前端文档区间
     function setVestingConfig(uint256 _vestingDelay, uint256 _vestingRate)
         external
         onlyOwnerOrConfigurator
         onlyConfigPhase
     {
-        if (_vestingDelay < 7 days || _vestingDelay > 90 days) revert InvalidVestingDelay();
+        if (_vestingDelay < 1 minutes || _vestingDelay > 90 days) revert InvalidVestingDelay();
         if (_vestingRate < 5 || _vestingRate > 20) revert InvalidVestingRate();
         vestingDelay = _vestingDelay;
         vestingRate = _vestingRate;

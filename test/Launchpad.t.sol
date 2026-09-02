@@ -5,7 +5,7 @@ pragma solidity ^0.8.13;
 import {Test, console2} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
-import {PRESALE, NothingToClaim, TokensAlreadyClaimed} from "src/Presale.sol";
+import {PRESALE, NothingToClaim, TokensAlreadyClaimed, InvalidVestingDelay} from "src/Presale.sol";
 
 interface IERC20Sim {
     function transfer(address to, uint256 value) external returns (bool);
@@ -114,6 +114,31 @@ contract LaunchpadTest is Test {
         assertEq(creatorClaimable, (creatorShare * 3) / 10);
         presale.claim();
         assertEq(token.balanceOf(address(this)), (creatorShare * 3) / 10);
+    }
+
+    /// @dev testnet 分支标定回归：vestingDelay 下限放宽至 1 分钟（主网口径 7 天）。
+    ///      低于 1 分钟仍拒绝；1 分钟周期端到端走通：认购 → 开盘 → 过满 1 周期领取
+    function test_VestingDelayTestnetFloor() public {
+        vm.expectRevert(InvalidVestingDelay.selector);
+        presale.setVestingConfig(30 seconds, 10);
+
+        presale.setVestingConfig(1 minutes, 10);
+        assertEq(presale.vestingDelay(), 1 minutes);
+
+        address alice = address(0x1234);
+        vm.deal(alice, 10 ether);
+        presale.openPresale();
+        vm.prank(alice);
+        presale.subscribe{value: 1 ether}();
+        presale.endPresale();
+        presale.launch();
+
+        // 过满 1 个 1 分钟周期 → 散户 1000 ether 份额 × 10% 解锁
+        vm.warp(block.timestamp + 1 minutes + 1);
+        assertEq(presale.getVestedAmount(alice), 100 ether);
+        vm.prank(alice);
+        presale.claim();
+        assertEq(token.balanceOf(alice), 100 ether);
     }
 
     function test_WithdrawUnsoldTokensVested() public {
