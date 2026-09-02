@@ -43,6 +43,7 @@ error NoTokensToClaim();
 error NotAfterLaunch();
 error NoBNBToWithdraw();
 error SoftCapTooLow();
+error ZeroMinLiquidity();
 error CreatorBuyTooLarge();
 error ZeroCreatorBuyValue();
 error CreatorBuyLocked();
@@ -236,6 +237,9 @@ contract PRESALE is Ownable, ReentrancyGuard {
         uint256 _startTime
     ) external onlyOwnerOrConfigurator onlyConfigPhase {
         if (presaleEnabled && _tokenPrice == 0) revert InvalidPrice();
+        // 加池下限不可归零：minLiquidityAmount=0 且 softCap=0 时 endPresale 必"达标"进状态 2，
+        // 而 launch 加池 0 BNB 恒 revert、状态 2 无退款通道（softCap ≥ minLiquidity 下 0 值即死角）
+        if (_minLiquidity == 0) revert ZeroMinLiquidity();
         presaleTokenPrice = _tokenPrice;
         maxPresaleTokens = _maxTokens;
         maxBuyPerWallet = _maxBuyPerWallet;
@@ -287,6 +291,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
         // 终检（条款冻结前最后一道闸）：任何配置路径下 softCap < minLiquidityAmount 都不可开盘，
         // 否则 status 2 死角（launch 的 InsufficientBNB 永不可满足，而 refund 仅 FAILED 态开放）
         if (softCap < minLiquidityAmount) revert SoftCapTooLow();
+        // 纵深防御：minLiquidityAmount 归零（双 0 组合绕过 SoftCapTooLow 检查）同样不可开盘
+        if (minLiquidityAmount == 0) revert ZeroMinLiquidity();
         presaleStatus = 1;
         emit PresaleOpened();
     }

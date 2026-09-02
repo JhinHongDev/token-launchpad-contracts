@@ -8,7 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.
 import {IPancakeRouter02} from "src/lib/interfaces/IPancakeRouter02.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
-import {PRESALE, ITokenMigration} from "src/Presale.sol";
+import {PRESALE, ITokenMigration, ZeroMinLiquidity} from "src/Presale.sol";
 import {TaxProcessor} from "src/TaxProcessor.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
 import {ITaxProcessor, TaxProcessorInitParams} from "src/lib/interfaces/ITaxProcessor.sol";
@@ -222,6 +222,9 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         if (tokenCreators[token] != msg.sender) revert NotTokenCreator();
         if (tokenConfigured[token]) revert AlreadyConfigured(); // 条款一次性配置，与底层状态 0 冻结一致
         if (presaleConfig.presaleTokenPrice == 0) revert InvalidPrice();
+        // 加池下限前置校验（与 PRESALE.setPresaleTerms 同源规则）：双 0 组合的 status 2 死角
+        // 在编排层即拦截，错误归属更清晰（发币表单事故在提交时报错，而非开盘阶段才暴露）
+        if (presaleConfig.minLiquidityAmount == 0) revert ZeroMinLiquidity();
         // token 模式漏传资金 = 前端事故：显式报错，杜绝"以为买了、实际静默没买"
         if (presaleConfig.creatorBuyTokens > 0 && msg.value == 0) revert CreatorBuyTokensWithoutFunding();
 

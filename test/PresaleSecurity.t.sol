@@ -2,18 +2,24 @@
 pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
+import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
 import {CoordinatorFactory, PresaleConfig} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
-import {PRESALE, PresaleNotOpen, PresaleDisabled, TokensAlreadyClaimed, SoftCapTooLow} from "src/Presale.sol";
+import {PRESALE, PresaleNotOpen, PresaleDisabled, TokensAlreadyClaimed, SoftCapTooLow, ZeroMinLiquidity} from "src/Presale.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
 
-/// @title 预售安全回归测试：封锁“绕过协调器直调 PRESALE 原生函数”的两条攻击路径
+/// @title 预售安全回归测试：封锁“绕过协调器直调 PRESALE 原生函数”的攻击路径
 /// @dev 攻击面：创建者即 PRESALE owner，可越过协调器直调配置类函数。
 ///      回归点 1：claimAllTokens（抽干托管仓）后不可再 configureLaunch 重开预售 → 防 exit scam
 ///      回归点 2：openPresale 终检 softCap >= minLiquidityAmount → 防配置顺序绕过导致 status 2 死锁
+///      回归点 3：setPresaleTerms 不可归零 minLiquidityAmount → 防"双 0 组合"绕过 softCap 检查（同死角）
 contract PresaleSecurityTest is Test {
+    using stdStorage for StdStorage;
+
+    StdStorage private _stdstore;
+
     uint256 constant SUPPLY = 1e6 ether;
 
     MockRouterWithFactory router;
@@ -82,6 +88,39 @@ contract PresaleSecurityTest is Test {
 
         vm.prank(creator);
         vm.expectRevert(SoftCapTooLow.selector); // 开盘终检拦截
+        presale.openPresale();
+
+        // 状态停在 0，认购不可达 → 无资金可入死角
+        vm.prank(victim);
+        vm.expectRevert(PresaleNotOpen.selector);
+        presale.subscribe{value: 3 ether}();
+        assertEq(address(presale).balance, 0, "no funds can enter");
+    }
+
+    /// 回归 3：setPresaleTerms 归零 minLiquidityAmount 必须被拒
+    /// （原死角成因：minLiquidityAmount=0 且 softCap=0 时 endPresale 必"达标"进状态 2，
+    ///   launch 加池 0 BNB 恒 revert、状态 2 无退款通道；双 0 组合下 softCap < minLiquidity
+    ///   检查失效（0 < 0 为 false），既有 SoftCapTooLow 防线完全绕过）
+    function test_RevertWhen_SetPresaleTermsWithZeroMinLiquidity() public {
+        vm.prank(creator);
+        vm.expectRevert(ZeroMinLiquidity.selector);
+        presale.setPresaleTerms(1e15, 5e8 ether, 1e8 ether, 0, 0, 0);
+    }
+
+    /// 回归 4：任何路径写出 minLiquidityAmount=0（含双 0 组合）后，openPresale 终检必须兜底拦截
+    /// （setter 闸口已封死正常路径；这里白盒写入模拟历史遗留/未知配置路径，验证最后防线完备）
+    function test_RevertWhen_OpenPresaleWithZeroMinLiquidity() public {
+        vm.prank(creator);
+        coordinator.setupPresale(token, _presaleConfig()); // 正常配置 softCap(0.1) == minLiquidity(0.1)
+
+        // 白盒写入双 0 组合（此时 SoftCapTooLow 检查因 0 < 0 为 false 而失效）
+        uint256 minLiqSlot = _stdstore.target(address(presale)).sig("minLiquidityAmount()").find();
+        vm.store(address(presale), bytes32(minLiqSlot), bytes32(uint256(0)));
+        uint256 softCapSlot = _stdstore.target(address(presale)).sig("softCap()").find();
+        vm.store(address(presale), bytes32(softCapSlot), bytes32(uint256(0)));
+
+        vm.prank(creator);
+        vm.expectRevert(ZeroMinLiquidity.selector); // 终检兜底：双 0 死角配置无法开盘
         presale.openPresale();
 
         // 状态停在 0，认购不可达 → 无资金可入死角

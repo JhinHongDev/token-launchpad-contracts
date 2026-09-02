@@ -5,7 +5,7 @@ pragma solidity ^0.8.13;
 import {Test} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
-import {PRESALE, PresaleSoldOut, NothingToClaim, InvalidStatus} from "src/Presale.sol";
+import {PRESALE, PresaleSoldOut, NothingToClaim, InvalidStatus, ZeroMinLiquidity} from "src/Presale.sol";
 import {
     CoordinatorFactory,
     NotTokenCreator,
@@ -325,6 +325,30 @@ contract CoordinatorTest is Test {
         cfg.maxBuyPerWallet = 0;
         vm.prank(creator);
         vm.expectRevert(InvalidMaxBuyPerWallet.selector);
+        coordinator.setupPresale(token, cfg);
+    }
+
+    /// @dev 回归：minLiquidityAmount=0 且 softCap=0 的双 0 组合 = status 2 死角
+    ///      （endPresale 必"达标"、launch 加池 0 BNB 恒 revert、状态 2 无退款通道），
+    ///      编排层前置拦截，发币表单事故在 setupPresale 提交时即报错
+    function test_RevertWhen_SetupPresaleWithZeroMinLiquidity() public {
+        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
+        PresaleConfig memory cfg = _presaleConfig();
+        cfg.minLiquidityAmount = 0;
+        cfg.softCap = 0; // 双 0 死角组合
+        vm.prank(creator);
+        vm.expectRevert(ZeroMinLiquidity.selector);
+        coordinator.setupPresale(token, cfg);
+    }
+
+    /// @dev 回归变体：minLiquidityAmount=0、softCap>0 同样拦截（setSoftCap 的 softCap >= 0 恒真，
+    ///      0 值加池下限本身就是非法配置；归一规则 = 加池下限必须为正）
+    function test_RevertWhen_SetupPresaleWithZeroMinLiquidityNonzeroSoftCap() public {
+        address token = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
+        PresaleConfig memory cfg = _presaleConfig();
+        cfg.minLiquidityAmount = 0; // softCap 保持 0.5 ether
+        vm.prank(creator);
+        vm.expectRevert(ZeroMinLiquidity.selector);
         coordinator.setupPresale(token, cfg);
     }
 
