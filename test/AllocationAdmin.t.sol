@@ -8,7 +8,7 @@ import {PRESALE, SoftCapExceedsHardcap} from "src/Presale.sol";
 import {CoordinatorFactory, InvalidAllocation} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
-import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
+import {MockRouterWithFactory, MockPairFactory, IERC20Lite, VanitySaltFinder} from "./TokenReservation.t.sol";
 
 /// @title 管理员可配置分配比例 + softCap ≤ hardcap 校验测试
 /// @dev 覆盖面：
@@ -259,9 +259,23 @@ contract AllocationAdminTest is Test {
     // 夹具
     // ---------------------------------------------------------------------------
 
+    uint256 private _saltSeq;
+
     function _createToken() internal returns (address token) {
+        // 序号派生标签保证每次新盐：同标签会同盐，同测试内二创必撞 CloneFailed（EIP-684）；
+        // 搜盐在 prank 之前完成（内部含外部调用，prank 后调用会被吞，见 TokenReservation.t 套路约束）
+        bytes32 salt = _vanitySalt(string.concat("alloc-", vm.toString(_saltSeq++)));
         vm.prank(creator);
-        (token,) = coordinator.createToken{value: 1 ether}(_tokenConfig(), bytes32(0));
+        (token,) = coordinator.createToken{value: 1 ether}(_tokenConfig(), salt);
+    }
+
+    /// @dev 按标签派生种子搜索尾号 8888 盐
+    function _vanitySalt(string memory tag) internal view returns (bytes32) {
+        (bytes32 s, bool found) = VanitySaltFinder.find(
+            address(tokenFactory), tokenFactory.flapImplementation(), uint256(keccak256(bytes(tag)))
+        );
+        assertTrue(found, "vanity salt should exist within budget");
+        return s;
     }
 
     function _tokenConfig() internal pure returns (TokenConfig memory) {
