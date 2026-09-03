@@ -43,6 +43,7 @@ error NoTokensToClaim();
 error NotAfterLaunch();
 error NoBNBToWithdraw();
 error SoftCapTooLow();
+error SoftCapExceedsHardcap();
 error ZeroMinLiquidity();
 error CreatorBuyTooLarge();
 error ZeroCreatorBuyValue();
@@ -267,9 +268,12 @@ contract PRESALE is Ownable, ReentrancyGuard {
         slippageProtection = _slippage;
     }
 
-    /// @notice 设置认购成功线；必须 ≥ 加池下限，否则 launch 的 InsufficientBNB 将成为永远不可满足的死门槛
+    /// @notice 设置认购成功线；必须 ≥ 加池下限，否则 launch 的 InsufficientBNB 将成为永远不可满足的死门槛；
+    ///         且不得超过 hardcap（hardcap > 0 时）——认购在达硬顶时被 HardcapReached 封顶，
+    ///         softCap > hardcap 的组合令募资永远到不了成功线，endPresale 必判 FAILED，注定失败的配置须在源头拦截
     function setSoftCap(uint256 _softCap) external onlyOwnerOrConfigurator onlyConfigPhase {
         if (_softCap < minLiquidityAmount) revert SoftCapTooLow();
+        if (hardcap > 0 && _softCap > hardcap) revert SoftCapExceedsHardcap();
         softCap = _softCap;
         emit SoftCapSet(_softCap);
     }
