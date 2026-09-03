@@ -57,7 +57,8 @@ contract TokenFactory is AccessControl {
     }
 
     /// @dev 部署克隆 → 创建 V2 交易对。TaxProcessor 由 Coordinator 部署并初始化（其部署者为调用链协调器）。
-    ///      salt == 0 走 CREATE（默认随机地址）；salt != 0 走 CREATE2 确定性地址（付费预留 CA / 五连 8 靓号档位，
+    ///      salt == 0 走 CREATE（保留给 COORDINATOR_ROLE 的底层能力，协调器层已废除此通道）；
+    ///      salt != 0 走 CREATE2 确定性地址（8888-only 体系：协调器校验尾号 + 预留占位，
     ///      目标地址已被占用时按 EIP-684 回滚 CloneFailed，天然防重复发币）。
     function createToken(TokenConfig memory config, bytes32 salt)
         external

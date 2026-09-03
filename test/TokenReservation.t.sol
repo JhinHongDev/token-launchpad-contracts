@@ -9,6 +9,7 @@ import {
     CoordinatorFactory,
     NotReserver,
     InvalidSalt,
+    InvalidVanitySuffix,
     InsufficientReservationFee,
     AddressAlreadyReserved,
     AddressAlreadyDeployed,
@@ -18,6 +19,43 @@ import {
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {PRESALE} from "src/Presale.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
+
+/// @dev 尾号 8888（低 16 bit）CREATE2 搜盐器：单轮 1 keccak(85B)、scratch 复用、无逐轮内存分配。
+///      测试环境专用（生产端在前端 JS 搜索）；from 为起始种子，调用方以不同 tag 派生避免趋同撞盐。
+library VanitySaltFinder {
+    uint160 internal constant VANITY_SUFFIX = 0x8888;
+    /// 期望 2^16 次命中，2^20 为远超 5σ 的保守上界
+    uint256 internal constant MAX_TRIES = 1 << 20;
+
+    function find(address factory, address impl, uint256 from) internal view returns (bytes32 salt, bool found) {
+        assembly {
+            let ptr := mload(0x40)
+            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
+            mstore(add(ptr, 0x14), shl(0x60, impl))
+            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
+            let ich := keccak256(ptr, 0x37)
+
+            let i := from
+            let end := add(from, 1048576)
+            for {} lt(i, end) {} {
+                // 写入顺序 = 布局顺序（ff → factory → salt → ich）：盐槽 [21,53) 与 factory 槽 [1,33)
+                // 重叠 [21,33) 区段，盐必须后写，否则其高 12 字节被 factory 的左填充零覆盖
+                mstore(ptr, shl(248, 0xff))
+                mstore(add(ptr, 1), shl(96, factory))
+                mstore(add(ptr, 21), i)
+                mstore(add(ptr, 53), ich)
+                let h := keccak256(ptr, 85)
+                // 地址 = h 低 20 字节 → 地址尾号 8888 = h 低 16 bit
+                if eq(and(h, 0xFFFF), 0x8888) {
+                    salt := i
+                    found := true
+                    break
+                }
+                i := add(i, 1)
+            }
+        }
+    }
+}
 
 contract MockPairFactory {
     address public pair;
@@ -111,15 +149,15 @@ interface IERC20Lite {
     function balanceOf(address account) external view returns (uint256);
 }
 
-/// @title CA 预留与五连 8 靓号确定性部署测试
+/// @title CA 预留与尾号 8888 靓号确定性部署测试
 /// @dev 套路约束（避坑）：
 ///      1) 动态金额一律先读入缓存变量再进 {value: ...}——花括号表达式的 staticcall 会吃掉
 ///         紧随其后的 vm.expectRevert 预期；
 ///      2) 事件断言走 vm.recordLogs 全量扫描，不做"镜像 emit 紧贴 target call"的位置敏感匹配。
 contract TokenReservationTest is Test {
     uint256 constant SUPPLY = 1e9 ether;
-    // 低 20 bit == 最后五个十六进制位；0x88888 即五连 8
-    uint160 constant VANITY_88888 = 0x88888;
+    // 地址尾号 = 低 16 bit；0x8888 即尾号 8888（全平台强制，见 VANITY_SUFFIX 校验）
+    uint160 constant VANITY_SUFFIX = 0x8888;
     bytes32 constant RESERVE_TOPIC = keccak256("TokenAddressReserved(address,address,uint256)");
 
     MockRouterWithFactory router;
@@ -155,8 +193,19 @@ contract TokenReservationTest is Test {
         vm.deal(creator, 100 ether);
         vm.deal(alice, 100 ether);
         vm.deal(bob, 10 ether);
+        // 盐先搜入局部变量再进调用：prank 之后的参数表达式里做外部调用会吞掉 prank（本文件"套路约束 1"）
+        bytes32 defaultSalt = _vanitySalt("tr-default");
         vm.prank(creator);
-        coordinator.createToken{value: cFee}(_tokenConfig(), bytes32(0));
+        coordinator.createToken{value: cFee}(_tokenConfig(), defaultSalt);
+    }
+
+    /// @dev 按标签派生种子搜索尾号 8888 盐（标签不同 → 种子不同 → 天然分散不撞盐）
+    function _vanitySalt(string memory tag) internal view returns (bytes32) {
+        (bytes32 s, bool found) = VanitySaltFinder.find(
+            address(tokenFactory), tokenFactory.flapImplementation(), uint256(keccak256(bytes(tag)))
+        );
+        assertTrue(found, "vanity salt should exist within budget");
+        return s;
     }
 
     // ---------------------------------------------------------------------------
@@ -192,7 +241,7 @@ contract TokenReservationTest is Test {
     }
 
     function test_DeterministicDeploymentLandsOnPredictedAddress() public {
-        bytes32 s = keccak256("t1");
+        bytes32 s = _vanitySalt("t1");
         address predicted = tokenFactory.predictTokenAddress(s);
 
         vm.recordLogs();
@@ -225,14 +274,27 @@ contract TokenReservationTest is Test {
         assertEq(IERC20Lite(predicted).balanceOf(coordinator.getTokenPresale(predicted)), SUPPLY);
     }
 
-    function test_ZeroSaltKeepsLegacyRandomPath() public {
+    function test_RevertWhen_ZeroSalt() public {
+        // 8888-only 体系：随机地址通道已废除，salt=0 一律拒绝
         vm.prank(creator);
+        vm.expectRevert(InvalidSalt.selector);
         coordinator.createToken{value: cFee}(_tokenConfig(), bytes32(0));
+    }
 
-        assertEq(coordinator.getTotalTokenCount(), 2);
-        address newest = coordinator.getTokenPresalePairsByCreator(creator, 0, 2)[1].tokenAddress;
-        assertTrue(coordinator.tokenExists(newest));
-        assertTrue(newest != tokenFactory.predictTokenAddress(bytes32(0)));
+    function test_RevertWhen_NonVanitySalt() public {
+        // 尾号非 8888 的盐：创建与预留双路径一律拒绝
+        bytes32 plain = keccak256("no-suffix");
+        assertTrue(
+            uint160(tokenFactory.predictTokenAddress(plain)) & 0xFFFF != VANITY_SUFFIX, "fixture must be non-vanity"
+        );
+
+        vm.prank(creator);
+        vm.expectRevert(InvalidVanitySuffix.selector);
+        coordinator.createToken{value: cFee}(_tokenConfig(), plain);
+
+        vm.prank(alice);
+        vm.expectRevert(InvalidVanitySuffix.selector);
+        coordinator.reserveTokenAddress{value: rFee}(plain);
     }
 
     // ---------------------------------------------------------------------------
@@ -240,7 +302,7 @@ contract TokenReservationTest is Test {
     // ---------------------------------------------------------------------------
 
     function test_RevertWhen_DuplicateSaltRedeploy() public {
-        bytes32 s = keccak256("dup");
+        bytes32 s = _vanitySalt("dup");
         vm.deal(bob, 1 ether);
 
         vm.prank(bob);
@@ -278,7 +340,7 @@ contract TokenReservationTest is Test {
     }
 
     function test_Tier1_PlainSaltReserveThenDeploy() public {
-        bytes32 s = keccak256("plain-ca");
+        bytes32 s = _vanitySalt("plain-ca");
         address predicted = tokenFactory.predictTokenAddress(s);
 
         vm.recordLogs();
@@ -311,7 +373,7 @@ contract TokenReservationTest is Test {
         coordinator.reserveTokenAddress{value: rFee}(bytes32(0));
 
         // 费用不足拒绝
-        bytes32 s = keccak256("short-pay");
+        bytes32 s = _vanitySalt("short-pay");
         vm.startPrank(alice);
         vm.expectRevert(InsufficientReservationFee.selector);
         coordinator.reserveTokenAddress{value: rFee - 1}(s);
@@ -323,7 +385,7 @@ contract TokenReservationTest is Test {
 
         // 多付超额原路退还，事件金额记实收费而非付款额
         uint256 before = bob.balance;
-        bytes32 s2 = keccak256("overpay");
+        bytes32 s2 = _vanitySalt("overpay");
         vm.recordLogs();
         vm.prank(bob);
         coordinator.reserveTokenAddress{value: rFee + 0.05 ether}(s2);
@@ -335,13 +397,14 @@ contract TokenReservationTest is Test {
         assertEq(evtFee2, rFee, "event must record actual fee, not overpaid amount");
 
         // 已有代码的预测地址不可再预留
+        bytes32 deployedSalt = _vanitySalt("deployed-first");
         vm.prank(creator);
-        coordinator.createToken{value: cFee}(_tokenConfig(), keccak256("deployed-first"));
-        address deployed = tokenFactory.predictTokenAddress(keccak256("deployed-first"));
+        coordinator.createToken{value: cFee}(_tokenConfig(), deployedSalt);
+        address deployed = tokenFactory.predictTokenAddress(deployedSalt);
         assertTrue(deployed.code.length != 0);
         vm.prank(bob);
         vm.expectRevert(AddressAlreadyDeployed.selector);
-        coordinator.reserveTokenAddress{value: rFee}(keccak256("deployed-first"));
+        coordinator.reserveTokenAddress{value: rFee}(deployedSalt);
     }
 
     // ---------------------------------------------------------------------------
@@ -349,7 +412,7 @@ contract TokenReservationTest is Test {
     // ---------------------------------------------------------------------------
 
     function test_NotReserver_BlockedWhileUnreservedAllowed() public {
-        bytes32 locked = keccak256("owned-by-alice");
+        bytes32 locked = _vanitySalt("owned-by-alice");
 
         vm.prank(alice);
         coordinator.reserveTokenAddress{value: rFee}(locked);
@@ -359,8 +422,8 @@ contract TokenReservationTest is Test {
         vm.expectRevert(NotReserver.selector);
         coordinator.createToken{value: cFee}(_tokenConfig(), locked);
 
-        // 未预留的盐任何人可用
-        bytes32 open = keccak256("open-salt");
+        // 未预留的 8888 盐任何人免费可用
+        bytes32 open = _vanitySalt("open-salt");
         vm.prank(bob);
         coordinator.createToken{value: cFee}(_tokenConfig(), open);
         assertEq(
@@ -369,46 +432,16 @@ contract TokenReservationTest is Test {
     }
 
     // ---------------------------------------------------------------------------
-    // 档位 2：五连 8 靓号搜索 → 预留 → 落位（前端可行性证明）
+    // 档位 2：尾号 8888 搜索 → 预留 → 落位（前端可行性证明，共享搜盐 library）
     // ---------------------------------------------------------------------------
 
-    /// @dev 固定 scratch 的汇编搜索器：单轮仅 1 次 keccak(85B)，无逐轮内存分配
-    function _findVanity88888() internal view returns (bytes32 saltHit, bool found) {
-        address factoryAddr = address(tokenFactory);
-        address impl = tokenFactory.flapImplementation();
-        assembly {
-            let ptr := mload(0x40)
-            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
-            mstore(add(ptr, 0x14), shl(0x60, impl))
-            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
-            let ich := keccak256(ptr, 0x37)
-
-            let i := 1
-            for {} lt(i, 8000000) {} {
-                mstore(add(ptr, 21), i) // 盐槽位复用（bytes32(i)）
-                mstore(ptr, shl(248, 0xff))
-                mstore(add(ptr, 1), shl(96, factoryAddr))
-                mstore(add(ptr, 53), ich)
-                let h := keccak256(ptr, 85)
-                // 地址 = h 低 20 字节，顶 5 位 hex = h 的 bit[140:160]
-                if eq(and(shr(140, h), 0xFFFFF), 0x88888) {
-                    saltHit := i
-                    found := true
-                    break
-                }
-                i := add(i, 1)
-            }
-        }
-    }
-
-    function test_Vanity88888_SearchReserveAndDeploy() public {
-        (bytes32 vanitySalt, bool found) = _findVanity88888();
-        assertTrue(found, "vanity salt should exist within budget");
+    function test_VanitySuffix8888_SearchReserveAndDeploy() public {
+        bytes32 vanitySalt = _vanitySalt("search-journey");
         assertTrue(vanitySalt != bytes32(0));
 
         address predicted = tokenFactory.predictTokenAddress(vanitySalt);
-        // 靓号 = 地址开头 5 位 hex（高 20 bit），非低位掩码
-        assertEq(uint160(predicted) >> 140, VANITY_88888);
+        // 靓号 = 地址尾号（低 16 bit）
+        assertEq(uint160(predicted) & 0xFFFF, VANITY_SUFFIX);
 
         // 完整用户旅程：搜到 → 预留 → 发币落位同一靓号地址
         vm.prank(alice);
@@ -436,7 +469,7 @@ contract TokenReservationTest is Test {
 
     /// @notice 工厂禁用 = 停止一切付费服务，预留同步不可用；重新启用后恢复
     function test_ReserveBlockedWhenFactoryDisabled() public {
-        bytes32 s = keccak256("disabled-window");
+        bytes32 s = _vanitySalt("disabled-window");
 
         coordinator.setFactoryEnabled(false);
         vm.prank(alice);

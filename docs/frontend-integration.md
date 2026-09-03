@@ -97,6 +97,7 @@ out/FlapTaxTokenV3.sol/FlapTaxTokenV3.json
 ① coordinator.createToken(config, salt)      创建者，payable ≥ creationFee
       └→ 链上自动：克隆代币 + 建 Pair + 部署 TaxProcessor + 建托管仓
          全量代币入托管仓，token 所有权 → 托管仓，托管仓所有权 → 创建者
+         （salt 必为搜好的 8888 靓号盐，见 2.4；地址尾号强制 8888）
 
 ② presale.claimAllTokens()                   创建者（托管仓 owner）
       └→ 一笔内自动：startMigration → finalizeMigration（税生效）
@@ -139,15 +140,27 @@ out/FlapTaxTokenV3.sol/FlapTaxTokenV3.json
 | `refund()` | 各认购者 | 精确取回本人全部缴款（按 `contributions` 账本，无截留） |
 | `reclaimTokens()` | 创建者 | 回收全部代币；**同笔内嵌迁移 + renounce**（领取即上线） |
 
-### 2.4 可选分支：确定性靓号地址（CREATE2）
+### 2.4 地址规则：全平台尾号 8888（CREATE2 靓号）
+
+> **8888-only 体系**：所有代币地址强制以 `8888` 结尾（低 16 bit == 0x8888）。`salt=0` 随机地址通道已废除——`createToken` 必须传"搜好的 8888 盐"，否则 revert（`InvalidSalt` / `InvalidVanitySuffix`）。预留功能保留，预留的同样是 8888 地址（"预先创建"）。
 
 ```
-① tokenFactory.predictTokenAddress(salt)          —— 纯视图，前端链下搜盐
-② coordinator.reserveTokenAddress{value: ≥reservationFee}(salt)  —— 预留权属（永久，不退款）
-③ coordinator.createToken(config, salt)            —— 兑现（他人已预留的盐会被 NotReserver 拒绝）
+默认流程（免费）：
+① 前端本地搜盐 → 找到尾号 8888 的 salt（平均 65536 次尝试，秒级）
+② coordinator.createToken{value: ≥creationFee}(config, salt)   —— 未预留的盐人人免费可用
+
+防抢跑（可选，付费 0.01 BNB 不退）：
+① 搜盐（同上）
+② coordinator.reserveTokenAddress{value: ≥reservationFee}(salt) —— 锁定权属（他人预留的盐会被 NotReserver 拒绝）
+③ coordinator.createToken(config, salt)                          —— 本人兑现
 ```
 
-`salt == 0` 表示随机地址，跳过 ①②。
+**前端搜盐指引（红线，务必遵守）**：
+- 公式：`keccak256(0xff ‖ tokenFactory地址 ‖ salt ‖ keccak256(EIP-1167 initCode))[12:]`，initCode = `3d602d80600a3d3981f3363d3d373d3d3d363d73` + 实现合约地址（20 字节）+ `5af43d82803e903d91602b57fd5bf3`；或循环调用 `tokenFactory.predictTokenAddress(salt)` 视图
+- **盐必须带随机种子派生**（如 `salt = keccak256(randomness, counter)`）：严禁从 0 或固定值递增搜索——否则所有用户趋同撞盐，后到者 `CloneFailed`
+- 校验：`uint160(predicted) & 0xFFFF == 0x8888` 命中即停
+- 只搜 CREATE2 盐、不涉及任何私钥生成（结构性规避 Profanity 类 vanity 工具的熵缺陷风险）
+- 抢跑风险：8888 盐海量（2^256 盐空间）、抢之无利，风险可忽略；在意者走付费预留通道
 
 ---
 
@@ -365,7 +378,8 @@ const mcapUSD   = priceBNB * bnbUsd * Number(totalSupply) / 1e18
 | `0x1a16b58e` | InvalidMaxBuyPerWallet | maxBuyPerWallet = 0 | 单钱包上限必须大于 0 |
 | `0xff3bfcc7` | ZeroMinLiquidity | setupPresale 传 minLiquidityAmount = 0 | 加池下限必须大于 0 |
 | `0xc6614516` | CreatorBuyTokensWithoutFunding | creatorBuyTokens>0 但未注资 | 请附购买注资 |
-| `0x81e69d9b` | InvalidSalt | reserveTokenAddress salt=0 | 盐值非法 |
+| `0x81e69d9b` | InvalidSalt | reserveTokenAddress salt=0；**createToken salt=0（随机通道已废除）** | 盐值非法 |
+| `0x01511986` | InvalidVanitySuffix | 预言地址尾号非 8888（createToken / reserveTokenAddress 双路径） | 盐对应地址尾号不是 8888 |
 | `0x3f5aba5f` | InsufficientReservationFee | 预留费不足 | 预留费不足 |
 | `0x5e72c18e` | AddressAlreadyReserved | 地址已被预留 | 该地址已被他人锁定 |
 | `0xd64bf586` | AddressAlreadyDeployed | 预言地址已有代码 | 地址已被占用 |
