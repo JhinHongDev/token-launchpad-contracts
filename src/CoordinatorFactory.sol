@@ -39,6 +39,7 @@ error AddressAlreadyReserved();
 error AddressAlreadyDeployed();
 error NotReserver();
 error CreatorBuyTokensWithoutFunding();
+error InvalidVanitySuffix();
 
 // ============================================================================
 // CoordinatorFactory - 一站式发币编排（代币 + Pair + TaxProcessor + 托管仓）
@@ -52,6 +53,11 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     uint256 public creationFee = 0.005 ether; // 0.005 BNB = 5e15 wei
     uint256 public reservationFee = 0.01 ether; // 锁定 CA（预留确定性地址）服务费，独立于创建费、不抵扣
     uint256 public totalPairsCreated = 0;
+
+    /// @notice 全平台统一地址尾号（低 16 bit）：所有代币地址必以 8888 结尾。
+    ///         前端本地搜盐（EIP-1014 公式，平均 65536 次尝试、秒级）；搜盐只碰 CREATE2 盐，
+    ///         不涉及私钥生成，结构性规避 Profanity 类 vanity 工具的熵缺陷风险。
+    uint160 public constant VANITY_SUFFIX = 0x8888;
 
     /// @notice 预测地址 → 预留者（CREATE2 预言地址的占位登记，永久有效，发币后保留作凭证）
     mapping(address => address) public tokenAddressReserver;
@@ -111,7 +117,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     ///      预售为可选步骤（见 setupPresale）。
     ///      - 不开预售：创建者 claimAllTokens() 一次性领取全部代币，同笔完成迁移（领取即上线）
     ///      - 开预售： 调用 setupPresale() 配置 30% 创建者 / 20% 底池 / 50% 预售
-    ///      - salt == 0：默认随机地址；salt != 0：CREATE2 确定性地址，须为本人预留的预言地址
+    ///      - 盐语义（8888-only 体系）：salt 必显式提供且预言地址尾号 == 8888（VANITY_SUFFIX）；
+    ///        未预留的盐免费可用（仅付 creationFee），他人预留的盐仅预留者可兑现（防抢跑占位保护）
     function createToken(TokenConfig memory tokenConfig, bytes32 salt)
         external
         payable
@@ -124,11 +131,13 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         if (bytes(tokenConfig.symbol).length == 0) revert EmptyTokenSymbol();
 
         // 步骤1: TokenFactory 部署克隆 + Pair + TaxProcessor
-        //       salt != 0 时先校验预留权属：预测地址若已被他人锁定则拒绝兑现（本人/未预留放行）
-        if (salt != bytes32(0)) {
-            address reserver = tokenAddressReserver[tokenFactory.predictTokenAddress(salt)];
-            if (reserver != address(0) && reserver != msg.sender) revert NotReserver();
-        }
+        //       8888-only 双闸门：盐必显式（随机通道已废除，杜绝非 8888 地址）+ 预言地址尾号校验；
+        //       预留权属照旧（他人预留的盐拒绝兑现，本人/未预留放行 —— 未预留即免费通道）
+        if (salt == bytes32(0)) revert InvalidSalt();
+        address predicted = tokenFactory.predictTokenAddress(salt);
+        if (uint160(predicted) & 0xFFFF != VANITY_SUFFIX) revert InvalidVanitySuffix();
+        address reserver = tokenAddressReserver[predicted];
+        if (reserver != address(0) && reserver != msg.sender) revert NotReserver();
         TokenFactory.TokenBundle memory bundle = tokenFactory.createToken(tokenConfig, salt);
         token = bundle.token;
         if (token == address(0)) revert TokenCreationFailed();
@@ -298,7 +307,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     // 锁定 CA：发币前付费预留确定性代币地址（前端链下搜盐后调用）
     // ---------------------------------------------------------------------------
 
-    /// @dev 校验链：工厂可用 → 盐非零 → 费足 → 预言地址尚无代码（未部署）→ 未被他人预留；
+    /// @dev 校验链：工厂可用 → 盐非零 → 费足 → 预言地址尾号 == 8888（预留同样是"预先创建 8888 地址"，
+    ///      与 createToken 的尾号闸门一致）→ 预言地址尚无代码（未部署）→ 未被他人预留；
     ///      先登记后退款（CEI + nonReentrant）。预留不过期、不退款；发币经 createToken(config, salt)
     ///      由 NotReserver 校验兑现权属。盐搜索属前端职责，合约内不存在任何枚举逻辑。
     ///      工厂禁用 = 停止一切付费服务，预留同步不可用（同 createToken 门槛）。
@@ -308,6 +318,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         if (msg.value < reservationFee) revert InsufficientReservationFee();
 
         address predicted = tokenFactory.predictTokenAddress(salt);
+        if (uint160(predicted) & 0xFFFF != VANITY_SUFFIX) revert InvalidVanitySuffix();
         if (predicted.code.length != 0) revert AddressAlreadyDeployed();
         if (tokenAddressReserver[predicted] != address(0)) revert AddressAlreadyReserved();
 

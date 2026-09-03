@@ -16,6 +16,7 @@ import {TokenFactory, TokenConfig, BuyFeeTooHigh, SellFeeTooHigh} from "src/Toke
 import {TaxProcessor} from "src/TaxProcessor.sol";
 import {PackedFeeConfig} from "src/lib/interfaces/ITaxProcessor.sol";
 import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
+import {VanitySaltFinder} from "./TokenReservation.t.sol";
 
 contract MockPairFactory {
     address public pair;
@@ -89,8 +90,18 @@ contract CoordinatorTest is Test {
         presaleFactory.grantRole(presaleFactory.COORDINATOR_ROLE(), address(coordinator));
 
         vm.deal(creator, 100 ether);
+        bytes32 salt = _vanitySalt("coordinator-default");
         vm.prank(creator);
-        coordinator.createToken{value: 1 ether}(_tokenConfig(), bytes32(0));
+        coordinator.createToken{value: 1 ether}(_tokenConfig(), salt);
+    }
+
+    /// @dev 按标签派生种子搜索尾号 8888 盐（标签分散起点，避免跨测试撞盐）
+    function _vanitySalt(string memory tag) internal view returns (bytes32) {
+        (bytes32 s, bool found) = VanitySaltFinder.find(
+            address(tokenFactory), tokenFactory.flapImplementation(), uint256(keccak256(bytes(tag)))
+        );
+        assertTrue(found, "vanity salt should exist within budget");
+        return s;
     }
 
     function test_CreateTokenOnlyNoPresaleSetup() public {
@@ -266,8 +277,9 @@ contract CoordinatorTest is Test {
 
     function test_RefundsExcessCreationFee() public {
         uint256 balanceBefore = creator.balance;
+        bytes32 salt = _vanitySalt("refund-case");
         vm.prank(creator);
-        coordinator.createToken{value: 1 ether}(_tokenConfig(), bytes32(0));
+        coordinator.createToken{value: 1 ether}(_tokenConfig(), salt);
         // 仅扣 0.005 创建费，多付全额退还
         assertEq(creator.balance, balanceBefore - 0.005 ether);
     }
@@ -300,22 +312,25 @@ contract CoordinatorTest is Test {
         TokenConfig memory cfg = _tokenConfig();
         cfg.buyTax = 1001; // > 10%
         vm.deal(creator, 1 ether);
+        bytes32 salt = _vanitySalt("tax-buy");
         vm.prank(creator);
         vm.expectRevert(BuyFeeTooHigh.selector);
-        coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
+        coordinator.createToken{value: 1 ether}(cfg, salt);
 
         TokenConfig memory cfg2 = _tokenConfig();
         cfg2.sellTax = 1001;
+        bytes32 salt2 = _vanitySalt("tax-sell");
         vm.prank(creator);
         vm.expectRevert(SellFeeTooHigh.selector);
-        coordinator.createToken{value: 1 ether}(cfg2, bytes32(0));
+        coordinator.createToken{value: 1 ether}(cfg2, salt2);
     }
 
     function test_ZeroAntiFarmerDurationAllowed() public {
         TokenConfig memory cfg = _tokenConfig();
         cfg.antiFarmerDuration = 0; // 支持用户不设防夹期
+        bytes32 salt = _vanitySalt("zero-af");
         vm.prank(creator);
-        (address token,) = coordinator.createToken{value: 1 ether}(cfg, bytes32(0));
+        (address token,) = coordinator.createToken{value: 1 ether}(cfg, salt);
         assertEq(FlapTaxTokenV3(token).antiFarmerDuration(), 0);
     }
 

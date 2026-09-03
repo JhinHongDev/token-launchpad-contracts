@@ -15,7 +15,7 @@ import {
 } from "src/Presale.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
-import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
+import {MockRouterWithFactory, MockPairFactory, IERC20Lite, VanitySaltFinder} from "./TokenReservation.t.sol";
 
 /// @title 预售安全回归测试：封锁“绕过协调器直调 PRESALE 原生函数”的攻击路径
 /// @dev 攻击面：创建者即 PRESALE owner，可越过协调器直调配置类函数。
@@ -50,15 +50,26 @@ contract PresaleSecurityTest is Test {
 
         vm.deal(creator, 100 ether);
         vm.deal(victim, 100 ether);
-        // 花括号 value 表达式内的 staticcall 会吞掉 vm.prank，先缓存费率（见 TokenReservation.t 注释）
+        // 花括号 value 表达式内的 staticcall 会吞掉 vm.prank，先缓存费率（见 TokenReservation.t 注释）；
+        // 同理搜盐（内含外部调用）必须先完成，再进 pranked 调用链
         uint256 fee = coordinator.creationFee();
+        bytes32 defaultSalt = _vanitySalt("security-default");
         vm.prank(creator);
-        (token, presale) = _create(fee);
+        (token, presale) = _create(fee, defaultSalt);
     }
 
-    function _create(uint256 fee) internal returns (address, PRESALE) {
-        (address t, address p) = coordinator.createToken{value: fee}(_tokenConfig(), bytes32(0));
+    function _create(uint256 fee, bytes32 salt) internal returns (address, PRESALE) {
+        (address t, address p) = coordinator.createToken{value: fee}(_tokenConfig(), salt);
         return (t, PRESALE(payable(p)));
+    }
+
+    /// @dev 按标签派生种子搜索尾号 8888 盐
+    function _vanitySalt(string memory tag) internal view returns (bytes32) {
+        (bytes32 s, bool found) = VanitySaltFinder.find(
+            address(tokenFactory), tokenFactory.flapImplementation(), uint256(keccak256(bytes(tag)))
+        );
+        assertTrue(found, "vanity salt should exist within budget");
+        return s;
     }
 
     /// 回归 1：抽干托管仓后重配置预售必须被拒（原 exit scam：领走 100% 代币后开预售募资，

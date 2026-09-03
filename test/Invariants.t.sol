@@ -8,7 +8,7 @@ import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PRESALE} from "src/Presale.sol";
 import {PresaleFactory} from "src/PresaleFactory.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
-import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
+import {MockRouterWithFactory, MockPairFactory, IERC20Lite, VanitySaltFinder} from "./TokenReservation.t.sol";
 
 uint256 constant SUPPLY = 1e9 ether; // FlapTaxTokenV3 固定总量
 uint256 constant MAX_TOKENS = 8; // 封顶防 invariant 校验循环膨胀
@@ -38,10 +38,24 @@ contract Handler {
     address[] reservedAddrs;
     mapping(address => address) ghostReserver;
 
+    /// 预搜的尾号 8888 盐池（全平台 8888-only）：SALT_SPACE 个互不相同靓号盐，
+    /// handler 按 seed 取用 —— 保留"小盐空间互扰"的 fuzz 语义（重复盐 → CloneFailed /
+    /// AddressAlreadyReserved 等业务 revert，fail_on_revert=false 正常容忍）
+    bytes32[SALT_SPACE] public vanitySalts;
+
     constructor(CoordinatorFactory _coordinator, TokenFactory _tokenFactory) {
         coordinator = _coordinator;
         tokenFactory = _tokenFactory;
         actors = [address(0xA11CE), address(0xB0B), address(0xC0C), address(0xD0D), address(0xE0E)];
+        for (uint256 i = 0; i < SALT_SPACE; i++) {
+            (bytes32 s, bool found) = VanitySaltFinder.find(
+                address(_tokenFactory),
+                _tokenFactory.flapImplementation(),
+                uint256(keccak256(abi.encode("inv-salt", i)))
+            );
+            require(found, "vanity salt should exist within budget");
+            vanitySalts[i] = s;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -51,7 +65,7 @@ contract Handler {
     function createToken(uint256 saltSeed, uint256 actorSeed) external {
         if (tokens.length >= MAX_TOKENS) return;
         address actor = actors[actorSeed % actors.length];
-        bytes32 salt = bytes32(uint256(saltSeed % SALT_SPACE));
+        bytes32 salt = vanitySalts[saltSeed % SALT_SPACE];
         vm.deal(actor, 1000 ether);
         // 先缓存费率：花括号 value 表达式内的 staticcall 会吞掉 vm.prank（见 TokenReservation.t 注释）
         uint256 fee = coordinator.creationFee();
@@ -66,7 +80,7 @@ contract Handler {
 
     function reserve(uint256 saltSeed, uint256 actorSeed) external {
         if (reservedAddrs.length >= MAX_TOKENS) return;
-        bytes32 salt = bytes32(uint256(saltSeed % SALT_SPACE));
+        bytes32 salt = vanitySalts[saltSeed % SALT_SPACE];
         address actor = actors[actorSeed % actors.length];
         vm.deal(actor, 1000 ether);
         uint256 fee = coordinator.reservationFee();

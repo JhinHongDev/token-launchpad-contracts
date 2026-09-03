@@ -15,7 +15,7 @@ import {
 import {CoordinatorFactory, CreatorBuyTokensWithoutFunding} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
-import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
+import {MockRouterWithFactory, MockPairFactory, IERC20Lite, VanitySaltFinder} from "./TokenReservation.t.sol";
 
 /// @title 创建者代币购买（Creator Buy）测试
 /// @dev 核心链路：setupPresale{value} 注资 → 认购 → endPresale → launch 内
@@ -58,13 +58,23 @@ contract CreatorBuyTest is Test {
         vm.deal(creator, 100 ether);
         vm.deal(alice, 10 ether);
 
+        bytes32 salt = _vanitySalt("creatorbuy-default");
         vm.prank(creator);
-        coordinator.createToken{value: 1 ether}(_tokenConfig(), bytes32(0));
+        coordinator.createToken{value: 1 ether}(_tokenConfig(), salt);
 
         // 缓存实例：vm.prank 会被下一次调用（含视图调用）消耗，
         // pranked 语句的参数里不可再嵌套外部调用
         tokenAddr = coordinator.getTokenPresalePairsByCreator(creator, 0, 1)[0].tokenAddress;
         sale = PRESALE(payable(coordinator.getTokenPresale(tokenAddr)));
+    }
+
+    /// @dev 按标签派生种子搜索尾号 8888 盐
+    function _vanitySalt(string memory tag) internal view returns (bytes32) {
+        (bytes32 s, bool found) = VanitySaltFinder.find(
+            address(tokenFactory), tokenFactory.flapImplementation(), uint256(keccak256(bytes(tag)))
+        );
+        assertTrue(found, "vanity salt should exist within budget");
+        return s;
     }
 
     // -------------------------------------------------------------------------
