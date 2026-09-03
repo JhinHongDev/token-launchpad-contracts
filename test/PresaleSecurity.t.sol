@@ -27,7 +27,7 @@ contract PresaleSecurityTest is Test {
 
     StdStorage private _stdstore;
 
-    uint256 constant SUPPLY = 1e6 ether;
+    uint256 constant SUPPLY = 1e9 ether;
 
     MockRouterWithFactory router;
     TokenFactory tokenFactory;
@@ -39,7 +39,7 @@ contract PresaleSecurityTest is Test {
     address victim = address(0xBEEF);
 
     function setUp() public {
-        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
+        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));

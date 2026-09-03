@@ -10,7 +10,7 @@ import {PresaleFactory} from "src/PresaleFactory.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReservation.t.sol";
 
-uint256 constant SUPPLY = 1e6 ether; // FlapTaxTokenV3 固定总量
+uint256 constant SUPPLY = 1e9 ether; // FlapTaxTokenV3 固定总量
 uint256 constant MAX_TOKENS = 8; // 封顶防 invariant 校验循环膨胀
 uint256 constant SALT_SPACE = 8; // 盐取值域 {0..7}：强制预留/发币/冲突路径互扰
 
@@ -254,7 +254,7 @@ contract LaunchpadInvariants is Test {
     Handler handler;
 
     function setUp() public {
-        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
+        FlapTaxTokenV3 flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         MockRouterWithFactory router = new MockRouterWithFactory(address(0xAABB), pairFactory);
         tokenFactory = new TokenFactory(address(flapImpl), address(router), address(0));

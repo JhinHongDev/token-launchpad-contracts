@@ -39,6 +39,7 @@ error AddressAlreadyReserved();
 error AddressAlreadyDeployed();
 error NotReserver();
 error CreatorBuyTokensWithoutFunding();
+error InvalidAllocation();
 
 // ============================================================================
 // CoordinatorFactory - 一站式发币编排（代币 + Pair + TaxProcessor + 托管仓）
@@ -52,6 +53,13 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     uint256 public creationFee = 0.005 ether; // 0.005 BNB = 5e15 wei
     uint256 public reservationFee = 0.01 ether; // 锁定 CA（预留确定性地址）服务费，独立于创建费、不抵扣
     uint256 public totalPairsCreated = 0;
+
+    /// @notice 代币分配比例（bps，和恒为 10000）：默认 30% 创建者 / 20% 底池 / 50% 预售
+    /// @dev 仅影响 setupPresale 时刻之后的新币（份额在 configureLaunch 时写入托管仓实例，
+    ///      已创建代币的份额随之冻结，不受后续调整影响）
+    uint256 public creatorBps = 3000;
+    uint256 public poolBps = 2000;
+    uint256 public presaleBps = 5000;
 
     /// @notice 预测地址 → 预留者（CREATE2 预言地址的占位登记，永久有效，发币后保留作凭证）
     mapping(address => address) public tokenAddressReserver;
@@ -86,6 +94,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     event FactoryEnabledSet(bool enabled);
     event CreationFeeSet(uint256 fee);
     event ReservationFeeSet(uint256 fee);
+    event AllocationUpdated(uint256 creatorBps, uint256 poolBps, uint256 presaleBps);
     event FeesWithdrawn(uint256 amount, address indexed to);
     event TokenAddressReserved(address indexed token, address indexed reserver, uint256 fee);
     event ExcessRefunded(address indexed to, uint256 amount);
@@ -110,7 +119,7 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
     ///      代币全量存入托管仓；token 所有权交托管仓（迁移编排前提），托管仓所有权归创建者；
     ///      预售为可选步骤（见 setupPresale）。
     ///      - 不开预售：创建者 claimAllTokens() 一次性领取全部代币，同笔完成迁移（领取即上线）
-    ///      - 开预售： 调用 setupPresale() 配置 30% 创建者 / 20% 底池 / 50% 预售
+    ///      - 开预售： 调用 setupPresale() 按当前配置比例分配（默认 30% 创建者 / 20% 底池 / 50% 预售）
     ///      - salt == 0：默认随机地址；salt != 0：CREATE2 确定性地址，须为本人预留的预言地址
     function createToken(TokenConfig memory tokenConfig, bytes32 salt)
         external
@@ -210,8 +219,9 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         return (token, presale);
     }
 
-    /// @dev 为已创建代币开启预售：份额 30% 创建者 / 20% 底池 / 50% 预售由合约写死计算，
-    ///      仅价格/上限/vesting 等由创建者配置；token 所有权在 createToken 时已交托管仓
+    /// @dev 为已创建代币开启预售：分配比例由管理员 setAllocation 配置（默认 30% 创建者 / 20% 底池 / 50% 预售），
+    ///      在本函数执行时刻读取并写入托管仓实例（此后冻结）；仅价格/上限/vesting 等由创建者配置；
+    ///      token 所有权在 createToken 时已交托管仓
     ///      （launch() 直接编排 startMigration → 加池 → 创建者购买 → finalizeMigration → renounceOwnership）
     /// @dev msg.value 为创建者购买注资（可选）：0 = 不购买；> 0 且 creatorBuyTokens = 0 为 quote
     ///      模式（花掉注资随行就市买入）；> 0 且 creatorBuyTokens > 0 为 token 模式（精确数量，超额退回）。
@@ -230,12 +240,15 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
 
         tokenConfigured[token] = true;
 
-        // 固定份额规则：30% 创建者 / 20% 底池 / 50% 预售（基于代币总供应量）
+        // 份额按管理员配置的比例计算（默认 30/20/50；经 setAllocation 可调，仅影响此刻之后的新币）
         uint256 supply = IERC20(token).balanceOf(presale);
         if (supply == 0) revert NoSupply();
-        uint256 creatorShare = (supply * 30) / 100;
-        uint256 poolShare = (supply * 20) / 100;
-        uint256 presaleShare = (supply * 50) / 100;
+        uint256 creatorShare = (supply * creatorBps) / 10_000;
+        uint256 poolShare = (supply * poolBps) / 10_000;
+        // 余数兜底：presaleShare = supply - 其余两项，三份额之和恒等于 supply（杜绝死锁残留）。
+        // 当前 maxSupply = 1e27 可被 10^4 整除，故与 (supply * presaleBps) / 10_000 恒等；
+        // 若未来调整 maxSupply 为非整除值，此写法自动把 wei 级余数归入预售份额而非锁死。
+        uint256 presaleShare = supply - creatorShare - poolShare;
 
         PRESALE p = PRESALE(payable(presale));
         p.configureLaunch(true, msg.sender, creatorShare, poolShare, presaleShare);
@@ -339,6 +352,19 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
         if (_fee == 0) revert ZeroCreationFee();
         reservationFee = _fee;
         emit ReservationFeeSet(_fee);
+    }
+
+    /// @notice 管理员调整代币分配比例（bps）
+    /// @dev 三项均须 > 0 且和 == 10000：任一为 0 会产生畸形托管（零底池/零预售/零创建者份额），
+    ///      和 < 10000 会令差额代币永久锁死在托管仓（无提取通道）。
+    ///      即时生效，仅影响之后 setupPresale 的新币；已配置代币的份额在实例内冻结不受影响。
+    function setAllocation(uint256 _creatorBps, uint256 _poolBps, uint256 _presaleBps) external onlyAdmin {
+        if (_creatorBps == 0 || _poolBps == 0 || _presaleBps == 0) revert InvalidAllocation();
+        if (_creatorBps + _poolBps + _presaleBps != 10_000) revert InvalidAllocation();
+        creatorBps = _creatorBps;
+        poolBps = _poolBps;
+        presaleBps = _presaleBps;
+        emit AllocationUpdated(_creatorBps, _poolBps, _presaleBps);
     }
 
     // slither-disable-next-line arbitrary-send-eth 仅 admin 可提，收款方 = 调用者本人，非任意目的地

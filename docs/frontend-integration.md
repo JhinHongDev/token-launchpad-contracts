@@ -1,6 +1,7 @@
 # 前端对接文档 — Token Launchpad（BSC 测试网）
 
-> 合约版本：2026-09-03 部署（testnet 分支：vestingDelay 下限放宽至 1 分钟；含"领取即上线"改造：`claimAllTokens` 内嵌迁移 + 全出口统一 renounce）
+> 合约版本：2026-09-03 部署（testnet 分支：vestingDelay 下限 1 分钟；含"领取即上线"改造：`claimAllTokens` 内嵌迁移 + 全出口统一 renounce）
+> ⚠️ 代码已前进（未部署）：本分支代码现含主网口径 `maxSupply = 1e9 ether`（10 亿枚）与清算阈值 5e6/1e7、管理员可配置分配比例（`setAllocation`，默认 30/20/50）、`softCap ≤ hardcap` 校验；**链上当前部署仍为旧版（100 万枚、固定 30/20/50、无软顶硬顶校验），重新部署前一切以读链为准**
 > 部署验证：链上冒烟测试全绿（发币 → 一键领取 → 税生效 → 池转账），交易哈希见附录 A
 
 ---
@@ -170,7 +171,7 @@ struct TokenConfig {
 
 注意事项：
 - `buyTax`/`sellTax` 超过 1000 bps 直接 revert（`InvalidPrice` 之外的 `TokenFactory` 校验），前端滑杆限制 0–10%
-- 代币固定 **18 位小数**、固定总量（读 `token.maxSupply()`，当前测试网为 `1e6 ether` = 100 万枚；**主网上线将恢复 10 亿，前端严禁硬编码**）
+- 代币固定 **18 位小数**、固定总量（读 `token.maxSupply()`，**前端严禁硬编码**；main 代码已恢复主网口径 `1e9 ether` = 10 亿枚，链上当前部署仍为 `1e6 ether` = 100 万枚测试口径，以读链为准）
 - 代币支持 ERC20Permit（`permit` 签名授权可用）
 
 ### 3.2 `PresaleConfig`（预售配置，10 字段，仅 `setupPresale` 一次性生效）
@@ -200,13 +201,13 @@ struct PresaleConfig {
 | `presaleTokenPrice` | > 0 | `InvalidPrice` |
 | `maxBuyPerWallet` | > 0 | `InvalidMaxBuyPerWallet` |
 | `minLiquidityAmount` | > 0 | `ZeroMinLiquidity` |
-| `softCap` | ≥ `minLiquidityAmount` | `SoftCapTooLow` |
+| `softCap` | ≥ `minLiquidityAmount` 且 ≤ `hardcap`（hardcap > 0 时） | `SoftCapTooLow` / `SoftCapExceedsHardcap` |
 | `vestingDelay` | 1 分钟 ~ 90 天（testnet 分支标定；主网口径 7 天） | `InvalidVestingDelay` |
 | `vestingRate` | 5 ~ 20 | `InvalidVestingRate` |
 | `slippage` | ≤ 1000 | `SlippageTooHigh` |
 | `creatorBuyTokens` > 0 时 | 注资 msg.value > 0 | `CreatorBuyTokensWithoutFunding` |
 
-**份额是合约写死的，不由用户配置**：30% 创建者 / 20% 底池 / 50% 预售（基于代币总量）。前端不要提供这三个输入框。
+**份额由管理员配置（前端动态读取，勿硬编码）**：默认 30% 创建者 / 20% 底池 / 50% 预售，平台管理员可经 `coordinator.setAllocation(creatorBps, poolBps, presaleBps)` 调整（三项均 > 0 且和 == 10000 bps，即时生效）。**比例在 `setupPresale` 时刻写入托管仓实例并冻结**——调整只影响之后创建的新币，已配置代币不受影响。前端在发币表单/详情页读 `coordinator.creatorBps()/poolBps()/presaleBps()` 获取当前比例，认购进度、定价推导（价格 = hardcap/预售份额）、破发线（= hardcap × poolBps/presaleBps）均以动态值为准；不要提供这三个比例的输入框。
 
 ### 3.3 `setupPresale` 的 msg.value 语义（创建者购买注资）
 
@@ -263,6 +264,7 @@ owner=托管仓              owner=0x0（出口交易内自动 renounce）
 | 事件 | topic0（keccak） | 用途 |
 |---|---|---|
 | `TokenPresalePairCreated(address,address,address,uint256)` | `0xd82d53ac9fb3ce23bd37e0b97a838b1dd1a29249c5fc8044b050d2717bfe7ac6` | 新代币上架（coordinator 上监听，全量列表增量维护） |
+| `AllocationUpdated(uint256,uint256,uint256)` | `0x21c55dfccedf7a8f464081b4c32abf493ebe4c9a653d37fd29365b3775a79cfd` | 分配比例变更（coordinator 上监听，变更后更新本地缓存的比例展示） |
 | `PoolStateChanged(uint8,uint8)` | `0x415234d2d8252539e96fb6c66ec4b3a9fd441ef58da0de24639c3e655503ec2d` | 上线信号（token 地址上监听；0→1→2 连续两条 = 出口交易执行） |
 | `AllTokensClaimed(address,uint256,uint256)` | `0x9beb1609b7ce6d449a3807626b3c2a8fdfd28db995c202b8ab5ec5c6820b950d` | 纯发币领取完成 |
 | `Subscribed(address,uint256,uint256)` | `0xf94991dcbea6e8ac439cbc93bd9c62a4d39f04e0ad656df9a703f13552c2787f` | 认购流水 |
@@ -333,7 +335,7 @@ const priceInBNB = bnbReserve / tokenReserve   // 代币与 WBNB 均 18 位小�
 实现要点：
 
 ```js
-const totalSupply = await token.totalSupply()   // 只读一次并缓存（恒定；勿硬编码：测试网 1M、主网 1B）
+const totalSupply = await token.totalSupply()   // 只读一次并缓存（恒定；勿硬编码：链上现为 1M 测试口径，重新部署后 1B）
 const priceBNB  = Number(bnbReserve) / Number(tokenReserve)
 const mcapUSD   = priceBNB * bnbUsd * Number(totalSupply) / 1e18
 ```
@@ -368,6 +370,7 @@ const mcapUSD   = priceBNB * bnbUsd * Number(totalSupply) / 1e18
 | `0x5e72c18e` | AddressAlreadyReserved | 地址已被预留 | 该地址已被他人锁定 |
 | `0xd64bf586` | AddressAlreadyDeployed | 预言地址已有代码 | 地址已被占用 |
 | `0x106874c5` | NotReserver | 兑现他人预留的盐 | 该靓号已被他人预留 |
+| `0x0baf7432` | InvalidAllocation | setAllocation 比例含 0 项或三项之和 ≠ 10000 bps | 分配比例配置非法 |
 
 ### 6.2 PRESALE（托管仓）
 
@@ -382,11 +385,12 @@ const mcapUSD   = priceBNB * bnbUsd * Number(totalSupply) / 1e18
 | `0x4e16195c` | PresaleNotStarted | 早于 startTime | 预售尚未开始 |
 | `0x7c946ed7` | ZeroValue | subscribe 附 0 BNB | 请输入金额 |
 | `0xc2f5625a` | AmountTooSmall | 换算代币数为 0 | 金额过小 |
-| `0xd4556c36` | PresaleSoldOut | 超出 50% 预售份额 | 已售罄 |
+| `0xd4556c36` | PresaleSoldOut | 超出预售份额（maxPresaleTokens） | 已售罄 |
 | `0x746f4607` | WalletLimitExceeded | 超单钱包上限 | 超出单钱包限购 |
 | `0x5be90159` | HardcapReached | 超募资硬顶 | 已达硬顶 |
 | `0xbf64110f` | InsufficientBNB | launch 时募资 < minLiquidity | 流动性门槛未达 |
 | `0xe4b16145` | SoftCapTooLow | softCap < minLiquidity | 软顶须不小于加池下限 |
+| `0xc0e1152e` | SoftCapExceedsHardcap | softCap > hardcap（hardcap > 0 时） | 软顶不可超过硬顶 |
 | `0xff3bfcc7` | ZeroMinLiquidity | setPresaleTerms/openPresale 遇 minLiquidityAmount = 0 | 加池下限必须大于 0 |
 | `0xa4f81929` | TokensAlreadyClaimed | 重复领取/领取后再开预售 | 已领取，不可重复 |
 | `0x969bf728` | NothingToClaim | 可领额度为 0（未到周期/已领完） | 暂无可领取份额 |
@@ -508,6 +512,7 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 | `getCreatorTokenCount(creator)` / `getTotalTokenCount()` | uint256 | 分页总数 |
 | `tokenExists(token)` | bool | 合法性校验 |
 | `creationFee()` / `reservationFee()` | uint256 | 费用预填 |
+| `creatorBps()` / `poolBps()` / `presaleBps()` | uint256 | 当前分配比例（bps，发币表单与详情页动态读取，勿硬编码 30/20/50） |
 | `factoryEnabled()` | bool | 平台开关 |
 | `tokenAddressReserver(predicted)` | address | 靓号预留权属查询 |
 | `tokenFactory.predictTokenAddress(salt)` | address | CREATE2 预言地址（纯视图，链下搜盐） |
@@ -522,7 +527,7 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 | `getUserVestingStatus(user)` | `(share, claimable, claimed, nextVestingTime)` |
 | `presaleTokenPrice()` / `softCap()` / `hardcap()` / `maxBuyPerWallet()` / `startTime()` | 条款展示 |
 | `accumulatedBNB()` / `totalSubscribedTokens()` | 进度条（配合 softCap/maxPresaleTokens） |
-| `creatorShare()` / `poolShare()` / `presaleShare()` | 固定份额展示 |
+| `creatorShare()` / `poolShare()` / `presaleShare()` | 本托管仓实例的冻结份额展示（setupPresale 时刻锁定，不随工厂比例调整变化） |
 | `vestingDelay()` / `vestingRate()` / `vestingStart()` | vesting 说明 |
 | `subscribedTokens(user)` / `contributions(user)` / `claimedTokens(user)` | 个人持仓页 |
 | `lpAddress()` | pair 地址（价格查询用） |
