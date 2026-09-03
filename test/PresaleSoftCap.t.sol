@@ -63,7 +63,7 @@ contract GreedyReceiver {
 
 /// @title 软顶失败结算与配置冻结单元测试
 contract PresaleSoftCapTest is Test {
-    uint256 constant SUPPLY = 1e6 ether;
+    uint256 constant SUPPLY = 1e9 ether;
 
     MockRouter router;
     FlapTaxTokenV3 token;
@@ -330,7 +330,7 @@ contract PresaleSoftCapTest is Test {
     // ---------------------------------------------------------------------------
 
     function _freshToken() internal returns (FlapTaxTokenV3) {
-        FlapTaxTokenV3 impl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
+        FlapTaxTokenV3 impl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
         FlapTaxTokenV3 t = FlapTaxTokenV3(payable(_clone(address(impl))));
 
         address[] memory pools = new address[](1);

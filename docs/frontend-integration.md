@@ -1,6 +1,7 @@
 # 前端对接文档 — Token Launchpad（BSC 测试网）
 
 > 合约版本：2026-09-03 部署（main 分支；含"领取即上线"改造：`claimAllTokens` 内嵌迁移 + 全出口统一 renounce）
+> ⚠️ 参数口径变更（未部署）：main 代码已恢复主网口径 —— `maxSupply = 1e9 ether`（10 亿枚）、清算阈值 MIN=5e6/START=1e7 ether；**链上当前部署仍为 100 万枚测试口径，重新部署前以 `token.maxSupply()` 读链为准**
 > 分支差异：`testnet` 分支另有 vestingDelay 下限放宽至 1 分钟的改动（未合入 main，未部署）
 > 部署验证：链上冒烟测试全绿（发币 → 一键领取 → 税生效 → 池转账），交易哈希见附录 A
 
@@ -171,7 +172,7 @@ struct TokenConfig {
 
 注意事项：
 - `buyTax`/`sellTax` 超过 1000 bps 直接 revert（`InvalidPrice` 之外的 `TokenFactory` 校验），前端滑杆限制 0–10%
-- 代币固定 **18 位小数**、固定总量（读 `token.maxSupply()`，当前测试网为 `1e6 ether` = 100 万枚；**主网上线将恢复 10 亿，前端严禁硬编码**）
+- 代币固定 **18 位小数**、固定总量（读 `token.maxSupply()`，**前端严禁硬编码**；main 代码已恢复主网口径 `1e9 ether` = 10 亿枚，链上当前部署仍为 `1e6 ether` = 100 万枚测试口径，以读链为准）
 - 代币支持 ERC20Permit（`permit` 签名授权可用）
 
 ### 3.2 `PresaleConfig`（预售配置，10 字段，仅 `setupPresale` 一次性生效）
@@ -334,7 +335,7 @@ const priceInBNB = bnbReserve / tokenReserve   // 代币与 WBNB 均 18 位小�
 实现要点：
 
 ```js
-const totalSupply = await token.totalSupply()   // 只读一次并缓存（恒定；勿硬编码：测试网 1M、主网 1B）
+const totalSupply = await token.totalSupply()   // 只读一次并缓存（恒定；勿硬编码：链上现为 1M 测试口径，重新部署后 1B）
 const priceBNB  = Number(bnbReserve) / Number(tokenReserve)
 const mcapUSD   = priceBNB * bnbUsd * Number(totalSupply) / 1e18
 ```

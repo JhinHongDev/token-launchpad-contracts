@@ -22,9 +22,9 @@ import {MockRouterWithFactory, MockPairFactory, IERC20Lite} from "./TokenReserva
 ///      （加池后、税启动前的 Migrating 免税窗口）原子买入 → 代币即时到账 creator。
 ///      mock 汇率恒 20 万枚/BNB，精确断言即隐含验证免税（有税则到账必然少于换出额）。
 contract CreatorBuyTest is Test {
-    uint256 constant SUPPLY = 1e6 ether;
-    uint256 constant POOL_SHARE = 2e5 ether; // 20% 底池份额 = 20 万枚
-    uint256 constant MAX_BUY = 5e4 ether; // poolShare × 25% = 5 万枚上限
+    uint256 constant SUPPLY = 1e9 ether;
+    uint256 constant POOL_SHARE = SUPPLY * 20 / 100; // 20% 底池份额 = 2 亿枚
+    uint256 constant MAX_BUY = POOL_SHARE * 25 / 100; // poolShare × 25% = 5000 万枚上限
 
     // 结构性镜像合约事件，供 vm.expectEmit 按 topic 匹配
     event LaunchFinalized(uint256 bnbAmount, uint256 tokenAmount, uint256 timestamp);
@@ -43,7 +43,7 @@ contract CreatorBuyTest is Test {
     PRESALE sale;
 
     function setUp() public {
-        flapImpl = new FlapTaxTokenV3(5e3 ether, 1e4 ether);
+        flapImpl = new FlapTaxTokenV3(5e6 ether, 1e7 ether);
         MockPairFactory pairFactory = new MockPairFactory();
         router = new MockRouterWithFactory(address(0xAABB), pairFactory);
 
