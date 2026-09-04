@@ -121,14 +121,15 @@ out/FlapTaxTokenV3.sol/FlapTaxTokenV3.json
 | ⑤ | `presale.endPresale()` | 创建者 | — | `presaleStatus == 1` |
 | ⑥ | `presale.launch()` | 创建者 | — | `presaleStatus == 2` 且 `accumulatedBNB ≥ minLiquidityAmount` |
 
-`launch()` 一笔内自动：`startMigration → 加池(20% 底池份额 + 全部募资 BNB, LP 死锁 0xdead) → 创建者购买(若注资) → finalizeMigration(税生效) → renounceOwnership`。**无需任何手动移交/迁移操作。**
+`launch()` 一笔内自动：`startMigration → 加池(20% 底池份额 + 全部募资 BNB, LP 死锁 0xdead) → 未售出预售份额销毁(0xdead) → 创建者购买(若注资) → finalizeMigration(税生效) → renounceOwnership`。**无需任何手动移交/迁移操作。**
+
+> **未售出代币销毁**：对齐 SmartDeFi Bonding Curve Finalization 语义——加池时未售出的预售份额（`presaleShare - totalSubscribedTokens`）即时销毁（转 `0xdead`），无任何提取入口。前端可用公开视图 `presaleShare - totalSubscribedTokens` 自行计算展示"将销毁数量"。
 
 开盘后（`presaleStatus == 3`）：
 
 | 动作 | 调用者 | 说明 |
 |---|---|---|
 | `claim()` | 散户/创建者 | 按 vesting 周期领取（30% 创建者份额 + 50% 认购份额共用本函数） |
-| `withdrawUnsoldTokens()` | 创建者 | 提取未售出的预售份额（同 vesting 节奏） |
 | `withdrawRemainingBNB()` | 创建者 | 提取路由器找零等残留 BNB |
 
 ### 2.3 分支：预售失败（未达 softCap）
@@ -248,7 +249,7 @@ struct PresaleConfig {
 | 0 | 创建/配置期 | `setupPresale`（协调器）/ `claimAllTokens` / `openPresale` |
 | 1 | 认购中 | `subscribe` / `endPresale` |
 | 2 | 认购结束（达 softCap） | `launch` |
-| 3 | 已开盘 | `claim` / `withdrawUnsoldTokens` / `withdrawRemainingBNB` |
+| 3 | 已开盘 | `claim` / `withdrawRemainingBNB`（未售出份额已在 `launch` 时销毁，无提取入口） |
 | 4 | 发行失败（STATUS_FAILED） | `refund`（散户）/ `reclaimTokens`（创建者） |
 
 ### 4.2 代币 `token.state()`（PoolState，克隆代理上读）
@@ -283,6 +284,7 @@ owner=托管仓              owner=0x0（出口交易内自动 renounce）
 | `Subscribed(address,uint256,uint256)` | `0xf94991dcbea6e8ac439cbc93bd9c62a4d39f04e0ad656df9a703f13552c2787f` | 认购流水 |
 | `PresaleFailed(uint256,uint256)` | `0xd0ded4316a63c0a62ce3e3bcc0c0feac58db8ad9c7a81ee1c347a0ec94bea5cc` | 发行失败信号 |
 | `LaunchFinalized(uint256,uint256,uint256)` | `0x263b23d9b2cab56070be836744ca814236a9e4ea7a3843341ec410490c2940c2` | 预售开盘完成 |
+| `UnsoldTokensBurned(uint256,uint256)` | `0xced35ff772e9afd2c1a34f79c598da2231e0efa7c39d83b54e45096ac5d23bd1` | 加池时未售出预售份额销毁（`launch` 同笔交易内，紧跟 `LiquidityAdded`） |
 | `Refunded(address,uint256)` | `0xd7dee2702d63ad89917b6a4da9981c90c4d24f8c2bdfd64c604ecae57d8d0651` | 失败退款 |
 | `TokensReclaimed(address,uint256)` | `0x22a8aff78fe371f7e69a64e6fc4276227e72c6512ccee617ff32eef318f4a9f3` | 失败代币回收 |
 | `VestingClaimed(address,uint256,uint256)` | `0x4a94c2c356e29a6583071e731bdacf2ca56565ba5efebcff6936eb7923b51721` | vesting 领取 |
@@ -505,7 +507,7 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 - `setupPresale` 是**一次性**的：条款配置后不可修改（`AlreadyConfigured`），前端提交前给确认弹窗
 - `subscribe` 的硬顶/限购/售罄在**同笔交易内原子校验**，无需前端预检（但预读做按钮置灰体验更好）
 - vesting 领取公式：`已释放 = 份额 × vestingRate × 已过周期数 / 100`，周期 = `(now - vestingStart) / vestingDelay`；开盘后下一个周期边界前可领为 0（正常，显示"下期释放时间"用 `getUserVestingStatus` 的 `nextVestingTime`）
-- `claim` / `refund` 对散户**免 owner 校验**（各领各的）；`claimAllTokens` / `launch` / `withdrawUnsoldTokens` / `reclaimTokens` 仅创建者
+- `claim` / `refund` 对散户**免 owner 校验**（各领各的）；`claimAllTokens` / `launch` / `reclaimTokens` 仅创建者
 - 代币克隆实例地址即 ERC20 合约地址，`name/symbol/decimals/balanceOf/permit` 全套标准接口可用
 
 ---

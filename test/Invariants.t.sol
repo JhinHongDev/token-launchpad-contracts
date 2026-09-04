@@ -33,7 +33,7 @@ contract Handler {
     mapping(address => bytes32) ghostSalt;
     mapping(address => address) ghostPresale;
     mapping(address => address) ghostCreator;
-    mapping(address => uint256) ghostReleased; // 托管仓累计流出（覆盖 claim/claimAll/unsold/reclaim/加池）
+    mapping(address => uint256) ghostReleased; // 托管仓累计流出（覆盖 claim/claimAll/reclaim/加池/未售出销毁）
 
     address[] reservedAddrs;
     mapping(address => address) ghostReserver;
@@ -155,16 +155,6 @@ contract Handler {
         _trackExit(token, p, p.owner(), 2);
     }
 
-    function withdrawUnsoldTokens(uint256 tokenIdx, uint256 warpSeed) external {
-        if (tokens.length == 0) return;
-        address token = tokens[tokenIdx % tokens.length];
-        PRESALE p = PRESALE(payable(ghostPresale[token]));
-        if (p.presaleStatus() != 3) return;
-        uint256 jump = warpSeed % 91 days;
-        if (jump > 0) vm.warp(block.timestamp + jump); // 推进 vesting 周期
-        _trackExit(token, p, p.owner(), 3);
-    }
-
     function refund(uint256 tokenIdx, uint256 actorSeed) external {
         if (tokens.length == 0) return;
         PRESALE p = PRESALE(payable(ghostPresale[tokens[tokenIdx % tokens.length]]));
@@ -219,13 +209,12 @@ contract Handler {
         uint256 before = IERC20Lite(token).balanceOf(address(p));
         vm.prank(caller);
         if (action == 0) {
-            p.launch(); // 20% 底池份额出仓加池
+            // 20% 底池份额出仓加池 + 未售出预售份额销毁(0xdead)，均为仓内流出
+            p.launch();
         } else if (action == 1) {
             p.claim();
         } else if (action == 2) {
             p.claimAllTokens(); // 纯发币模式 100% 出仓
-        } else if (action == 3) {
-            p.withdrawUnsoldTokens();
         } else {
             p.reclaimTokens(); // 失败终态：未售份额全量退回创建者
         }

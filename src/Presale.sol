@@ -65,7 +65,8 @@ interface ITokenMigration {
 ///       迁移三步 + renounceOwnership —— 领取即上线，此后创建者可自由分发或去 DEX 加池/交易
 ///       （入池与否、数量、时机均由创建者决定）
 ///     - 预售模式（presaleEnabled=true）：30% 创建者 / 20% 底池 / 50% 预售，散户 BNB 认购代币份额，
-///       launch() 自动完成 startMigration → 加池(LP 死锁 0xdead) → finalizeMigration → renounceOwnership
+///       launch() 自动完成 startMigration → 加池(LP 死锁 0xdead) → 未售出预售份额销毁(0xdead)
+///       → finalizeMigration → renounceOwnership
 ///     - 失败终态（STATUS_FAILED=4）：endPresale 时未达 softCap 则宣告发行失败，散户经 refund()
 ///       精确取回缴款、创建者经 reclaimTokens() 回收代币（同样内嵌迁移，不残留锁池状态），其余功能全部封锁
 ///     迁移前提：token 所有权自 createToken 起在本合约（迁移函数仅 owner 可调），各出口完成时 renounce。
@@ -115,9 +116,6 @@ contract PRESALE is Ownable, ReentrancyGuard {
     mapping(address => uint256) public subscribedTokens;
     mapping(address => uint256) public contributions; // 每钱包实际缴款（BNB wei）：Failed 退款精确口径
 
-    // === 未售出部分（launch 后归创建者提取）===
-    uint256 public unsoldWithdrawn; // 已提取的未售出代币量（防重复提取）
-
     // === vesting ===
     uint256 public vestingDelay;
     uint256 public vestingRate; // 每周期释放百分比
@@ -162,7 +160,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
     event LaunchFinalized(uint256 bnbAmount, uint256 tokenAmount, uint256 timestamp);
     event VestingClaimed(address indexed user, uint256 amount, uint256 timestamp);
     event AllTokensClaimed(address indexed user, uint256 amount, uint256 timestamp);
-    event UnsoldTokensWithdrawn(address indexed to, uint256 amount, uint256 timestamp);
+    event UnsoldTokensBurned(uint256 amount, uint256 timestamp);
     event RemainingBNBWithdrawn(uint256 amount, address indexed to);
     event LiquidityAdded(uint256 tokenAmount, uint256 bnbAmount, uint256 lpTokens, address indexed lpReceiver);
     event SoftCapSet(uint256 softCap);
@@ -364,6 +362,17 @@ contract PRESALE is Ownable, ReentrancyGuard {
         // 步骤2: Migrating 状态加池（无税），LP 全部死锁 0xdead
         _addLiquidity(poolShare, poolBnb);
 
+        // 步骤2.1: 未售出的预售份额即时销毁（转 0xdead，与 LP 死锁同址）——对齐 SmartDeFi
+        //          Bonding Curve Finalization 语义："Any unsold tokens at the time of
+        //          liquidity provisioning will be burned (sent to a dead address)"
+        //          常规路径认购不可能超出预售份额（Coordinator 强制 maxPresaleTokens == presaleShare），
+        //          直接配置路径下的极端超额认购以 0 兜底，避免 status 2 死角（无退款通道）
+        uint256 unsold = presaleShare > totalSubscribedTokens ? presaleShare - totalSubscribedTokens : 0;
+        if (unsold > 0) {
+            TransferHelper.safeTransfer(coinAddress, LP_LOCK_ADDRESS, unsold);
+            emit UnsoldTokensBurned(unsold, block.timestamp);
+        }
+
         // 步骤2.5: 创建者购买 —— 必须在加池后（池子有钱可买）、finalizeMigration 前
         //         （Migrating 态免税窗口：FoT 约束下"精确数量"模式仅此窗口可用，
         //          税启动后 swapETHForExactTokens 会因到账量<期望量必然 revert）
@@ -564,29 +573,6 @@ contract PRESALE is Ownable, ReentrancyGuard {
         emit AllTokensClaimed(msg.sender, balance, block.timestamp);
     }
 
-    /// @notice 开盘后创建者按 vesting 曲线分批提取未售出的预售份额（presaleShare - 已认购量）
-    /// @dev 与创建者 30% 份额共用 vestingDelay/vestingRate 释放节奏（周期数 = (now - vestingStart)/delay）；
-    ///      unsoldWithdrawn 累计防超提；与散户/创建者 claim 份额互不相交（总体守恒：20%池+50%预售+30%创建者）
-    function withdrawUnsoldTokens() external onlyOwner nonReentrant {
-        if (presaleStatus != 3) revert NotAfterLaunch();
-
-        uint256 unsold = presaleShare - totalSubscribedTokens; // launch 后为常值
-        if (unsold == 0) revert NothingToClaim();
-
-        // 按 vesting 曲线分批释放（与创建者 30% 份额共用同一公式 _vestedOf）
-        uint256 vested = _vestedOf(unsold);
-
-        uint256 amount = vested - unsoldWithdrawn;
-        if (amount == 0) revert NothingToClaim();
-
-        uint256 balance = IERC20(coinAddress).balanceOf(address(this));
-        if (balance < amount) revert NoTokensToClaim();
-
-        unsoldWithdrawn += amount;
-        TransferHelper.safeTransfer(coinAddress, msg.sender, amount);
-        emit UnsoldTokensWithdrawn(msg.sender, amount, block.timestamp);
-    }
-
     /// @notice 开盘后合约内残留 BNB 提取（路由器找零等）
     /// @dev 用低层 call 转账（TransferHelper），owner 为合约钱包（如 Safe 多签）时不会被 2300 gas 卡死
     function withdrawRemainingBNB() external onlyOwner nonReentrant {
@@ -599,7 +585,7 @@ contract PRESALE is Ownable, ReentrancyGuard {
 
     // ---------------------------------------------------------------------------
     // 发行失败结算（endPresale 未达 softCap 进入 STATUS_FAILED 后）
-    // Failed 态下 subscribe/claim/launch/withdrawUnsoldTokens/withdrawRemainingBNB
+    // Failed 态下 subscribe/claim/launch/withdrawRemainingBNB
     // 均被各自的状态检查天然封锁，唯一出口是退款与代币回收。
     // ---------------------------------------------------------------------------
 

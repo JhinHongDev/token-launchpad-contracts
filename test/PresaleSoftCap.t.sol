@@ -175,8 +175,6 @@ contract PresaleSoftCapTest is Test {
         vm.expectRevert(InvalidStatus.selector);
         presale.launch();
         vm.expectRevert(NotAfterLaunch.selector);
-        presale.withdrawUnsoldTokens();
-        vm.expectRevert(NotAfterLaunch.selector);
         presale.withdrawRemainingBNB();
         // 无缴款者退款为空
         vm.expectRevert(NothingToClaim.selector);
