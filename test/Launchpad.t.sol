@@ -5,7 +5,7 @@ pragma solidity ^0.8.13;
 import {Test, console2} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
 import {IFlapTaxTokenV3} from "src/lib/interfaces/IFlapTaxTokenV3.sol";
-import {PRESALE, NothingToClaim, TokensAlreadyClaimed, InvalidVestingDelay} from "src/Presale.sol";
+import {PRESALE, TokensAlreadyClaimed, InvalidVestingDelay} from "src/Presale.sol";
 
 interface IERC20Sim {
     function transfer(address to, uint256 value) external returns (bool);
@@ -45,6 +45,9 @@ contract LaunchpadTest is Test {
     uint256 poolShare = SUPPLY * 20 / 100;
     uint256 presaleShare = SUPPLY * 50 / 100;
 
+    // 结构性镜像合约事件，供 vm.expectEmit 按 topic 匹配（签名一致即可命中）
+    event UnsoldTokensBurned(uint256 amount, uint256 timestamp);
+
     function setUp() public {
         router = new MockRouter();
         vm.deal(address(this), 100 ether);
@@ -82,10 +85,11 @@ contract LaunchpadTest is Test {
         assertEq(uint8(token.state()), 0); // BondingCurve
         presale.launch();
 
-        // 迁移完成：税态 + token 无主 + LP 死锁
+        // 迁移完成：税态 + token 无主 + LP 死锁；未售出预售份额同步销毁（0xdead 同址）
         assertEq(uint8(token.state()), uint8(IFlapTaxTokenV3.PoolState.TaxEnforcedAntiFarmer));
         assertEq(token.owner(), address(0));
-        assertEq(token.balanceOf(LP_DEAD), poolShare); // LP 侧代币已死锁黑洞
+        assertEq(token.balanceOf(LP_DEAD), poolShare + presaleShare - 1000 ether); // LP 侧 + 未售出销毁
+        assertEq(token.balanceOf(address(presale)), creatorShare + 1000 ether); // 仅剩创建者+已认购份额
         assertEq(presale.liquidityAdded(), true);
         assertEq(presale.presaleStatus(), 3);
 
@@ -141,7 +145,9 @@ contract LaunchpadTest is Test {
         assertEq(token.balanceOf(alice), 100 ether);
     }
 
-    function test_WithdrawUnsoldTokensVested() public {
+    /// @dev 对齐 SmartDeFi Bonding Curve Finalization：加池时未售出的预售份额即时销毁(0xdead)，
+    ///      托管仓仅剩创建者份额 + 已认购份额，无"未售出提取"出口
+    function test_UnsoldTokensBurnedAtLaunch() public {
         address alice = address(0x1234);
         vm.deal(alice, 10 ether);
 
@@ -149,30 +155,48 @@ contract LaunchpadTest is Test {
         vm.prank(alice);
         presale.subscribe{value: 1 ether}(); // 卖出 1000 ether，未售 = presaleShare - 1000 ether
         presale.endPresale();
-        presale.launch();
 
         uint256 unsold = presaleShare - 1000 ether;
 
-        // launch 后立即提取：vesting 未开始 → 无配额
-        vm.expectRevert(NothingToClaim.selector);
-        presale.withdrawUnsoldTokens();
+        vm.expectEmit(false, false, false, true, address(presale));
+        emit UnsoldTokensBurned(unsold, block.timestamp);
+        presale.launch();
 
-        // 第 1 个周期（7 天）：提取 10%
+        // 0xdead 同时承接 LP 侧代币与未售出销毁
+        assertEq(token.balanceOf(LP_DEAD), poolShare + unsold);
+        // 托管仓仅剩创建者份额 + 已认购份额（claim 出口守恒）
+        assertEq(token.balanceOf(address(presale)), creatorShare + 1000 ether);
+
+        // 散户 vesting 领取不受影响
         vm.warp(block.timestamp + 7 days + 1);
-        uint256 balanceBefore = token.balanceOf(address(this));
-        presale.withdrawUnsoldTokens();
-        assertEq(token.balanceOf(address(this)), balanceBefore + (unsold * 10) / 100);
-        assertEq(presale.unsoldWithdrawn(), (unsold * 10) / 100);
-
-        // 第 2 个周期：再 10%
-        vm.warp(block.timestamp + 7 days);
-        presale.withdrawUnsoldTokens();
-        assertEq(presale.unsoldWithdrawn(), (unsold * 20) / 100);
-
-        // 散户份额不受影响：此时已过 2 个周期，领取 2 期
         vm.prank(alice);
         presale.claim();
-        assertEq(token.balanceOf(alice), 200 ether);
+        assertEq(token.balanceOf(alice), 100 ether);
+    }
+
+    /// @dev 售罄边界：认购恰好打满预售份额 → 未售出为 0，无销毁，launch 正常完成
+    function test_SoldOutLaunchBurnsNothing() public {
+        // maxBuyPerWallet = 1e8 ether，5 个钱包各认购满额恰好打满 presaleShare(5e8 ether)
+        address[5] memory buyers =
+            [address(0x1001), address(0x1002), address(0x1003), address(0x1004), address(0x1005)];
+        for (uint256 i = 0; i < 5; i++) {
+            vm.deal(buyers[i], 1e5 ether); // 1e8 ether 代币 × 1e15 价格 = 1e5 ether
+        }
+
+        presale.openPresale();
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(buyers[i]);
+            presale.subscribe{value: 1e5 ether}();
+        }
+        presale.endPresale();
+
+        assertEq(presale.totalSubscribedTokens(), presaleShare); // 恰好售罄
+
+        presale.launch();
+
+        // 死锁地址仅 LP 侧代币；托管仓剩创建者份额 + 全部已认购份额
+        assertEq(token.balanceOf(LP_DEAD), poolShare);
+        assertEq(token.balanceOf(address(presale)), creatorShare + presaleShare);
     }
 
     function test_NoPresaleClaimAll() public {
