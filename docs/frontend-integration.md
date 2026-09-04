@@ -1,8 +1,8 @@
 # 前端对接文档 — Token Launchpad（BSC 测试网）
 
-> 合约版本：2026-09-03 部署（testnet 分支：vestingDelay 下限 1 分钟；含"领取即上线"改造：`claimAllTokens` 内嵌迁移 + 全出口统一 renounce）
-> ⚠️ 代码已前进（未部署）：本分支代码现含主网口径 `maxSupply = 1e9 ether`（10 亿枚）与清算阈值 5e6/1e7、管理员可配置分配比例（`setAllocation`，默认 30/20/50）、`softCap ≤ hardcap` 校验、**预售时长体系**（`duration` 配置、认购窗口 `[startTime, endTime)`、硬顶恰达同笔自动结算、到期后任何人 force-end、72h 未开盘兜底 `enforceLaunchDeadline`、失败后双出口 `reclaimTokens` / `relaunchPresale`）；**链上当前部署仍为旧版（100 万枚、固定 30/20/50、无软顶硬顶校验、无时长体系），重新部署前一切以读链为准**
-> 部署验证：链上冒烟测试全绿（发币 → 一键领取 → 税生效 → 池转账），交易哈希见附录 A
+> 合约版本：2026-09-04 部署（feat/presale-duration 分支 @ aa6429b：预售时长体系上线——`duration` 配置、认购窗口 `[startTime, endTime)`、硬顶恰达同笔自动结算、到期后任何人 force-end、72h 未开盘兜底 `enforceLaunchDeadline`、失败后双出口 `reclaimTokens` / `relaunchPresale`、退款作废份额防跨轮记账；此前特性保留：vestingDelay 下限 1 分钟、"领取即上线"、1e9 总量、setAllocation、softCap ≤ hardcap 校验）
+> 部署验证：BscScan 源码验证 5/5 全绿 + 全场景链上冒烟测试通过（成功链路 / 硬顶自动结算 / 到期 force-end / 失败双出口 / 跨轮记账 / 72h 门禁），交易哈希见附录 A
+> ⚠️ **本节地址即当前链上部署**（97 链），合约源码均已验证；后续代码前进时再更新此处并恢复"未部署"警示
 
 ---
 
@@ -33,15 +33,15 @@
 | RPC（WebSocket） | `wss://bsc-testnet-rpc.publicnode.com` |
 | 区块浏览器 | `https://testnet.bscscan.com` |
 
-### 1.2 本平台合约（2026-09-03 部署，testnet 分支）
+### 1.2 本平台合约（2026-09-04 部署，feat/presale-duration 分支，源码已验证）
 
 | 合约 | 地址 | 前端是否直接交互 |
 |---|---|---|
-| **CoordinatorFactory（唯一入口）** | `0xfb5a2029D8464C3dFB4baEaD9ee44853E2f9cA45` | ✅ 主要交互对象 |
-| FlapTaxTokenV3 实现（模板） | `0x0eB92ffcA94EB424C6fbD93698dB9490533A0AcA` | ❌ 仅克隆实现，不直接调用 |
-| TokenFactory | `0xab363c6410296A3f39D01d278A34adA9517A5e25` | ❌ 由 Coordinator 调度 |
-| PRESALE 模板 | `0x48a4a9f357Ac0AE1d4118Efc6e0Be320D3f103eC` | ❌ 仅克隆实现 |
-| PresaleFactory | `0x236a6752323324F23301958b06B9b17cB8151294` | ❌ 由 Coordinator 调度 |
+| **CoordinatorFactory（唯一入口）** | `0xf157006eBA5b5d234A71f6d949B4e944458e619F` | ✅ 主要交互对象 |
+| FlapTaxTokenV3 实现（模板） | `0x835Eb5BB068ccb1DB72Ca58f18466fab06A08ED8` | ❌ 仅克隆实现，不直接调用 |
+| TokenFactory | `0x1d60B1DD9dF8d4FE7EE0B99d48333C06C01912Ca` | ❌ 由 Coordinator 调度 |
+| PRESALE 模板 | `0xfC438a24e0B952A77e529D68D9d624b75A8A3267` | ❌ 仅克隆实现 |
+| PresaleFactory | `0x6Fece4eb39652c7B8Af3e9Ce138AacC96aA74199` | ❌ 由 Coordinator 调度 |
 
 ### 1.3 第三方合约（PancakeSwap V2 测试网）
 
@@ -511,11 +511,15 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 
 | 合约 | 旧地址（已废弃） |
 |---|---|
-| CoordinatorFactory（旧入口） | `0xd1EC0390D9847A711A0ccEA8AAA383eC59C7680a` |
-| FlapTaxTokenV3 实现 | `0x47ab84F2FEFD302e92F2806466d1937C6A0914CB` |
-| PRESALE 模板 | `0x25BbCaB8460D53d89eF8D308087A3581bD485C30` |
-| PresaleFactory | `0x81754273b6B3DCF536B14c8E37a5154e919a0d19` |
-| TokenFactory | `0x0609349969A50e14EF0e9b628CCE9aFB0a183bF9` |
+| CoordinatorFactory（旧入口） | `0xfb5a2029D8464C3dFB4baEaD9ee44853E2f9cA45`（2026-09-03 版） |
+| FlapTaxTokenV3 实现 | `0x0eB92ffcA94EB424C6fbD93698dB9490533A0AcA`（2026-09-03 版） |
+| PRESALE 模板 | `0x48a4a9f357Ac0AE1d4118Efc6e0Be320D3f103eC`（2026-09-03 版，无时长体系） |
+| TokenFactory | `0xab363c6410296A3f39D01d278A34adA9517A5e25`（2026-09-03 版） |
+| CoordinatorFactory（更旧） | `0xd1EC0390D9847A711A0ccEA8AAA383eC59C7680a`（8 月末版，10 万枚口径） |
+| FlapTaxTokenV3 实现（更旧） | `0x47ab84F2FEFD302e92F2806466d1937C6A0914CB` |
+| PRESALE 模板（更旧） | `0x25BbCaB8460D53d89eF8D308087A3581bD485C30` |
+| PresaleFactory（更旧） | `0x81754273b6B3DCF536B14c8E37a5154e919a0d19` |
+| TokenFactory（更旧） | `0x0609349969A50e14EF0e9b628CCE9aFB0a183bF9` |
 
 **2026-09-01 部署（上一版，已废弃）**：
 
@@ -602,7 +606,7 @@ import { bscTestnet } from "viem/chains";
 
 const RPC  = "https://bsc-testnet-rpc.publicnode.com";
 const WSRPC = "wss://bsc-testnet-rpc.publicnode.com";
-const COORDINATOR = "0xfb5a2029D8464C3dFB4baEaD9ee44853E2f9cA45";
+const COORDINATOR = "0xf157006eBA5b5d234A71f6d949B4e944458e619F";
 
 const client   = createPublicClient({ chain: bscTestnet, transport: http(RPC) });
 const wsClient = createPublicClient({ chain: bscTestnet, transport: webSocket(WSRPC) });
@@ -681,34 +685,40 @@ try { ... } catch (e) {
 
 ---
 
-## 附录 A：部署核验记录（2026-09-03，testnet 分支）
+## 附录 A：部署核验记录（2026-09-04，feat/presale-duration 分支 @ aa6429b）
 
-**部署交易**：`forge script script/Deploy.s.sol`（broadcast 产物 `broadcast/Deploy.s.sol/97/run-latest.json`），部署者 `0x463c...21D3`，7 笔交易全部上链成功（5 笔 CREATE + 2 笔角色授权），实际总 gas 12,281,249 @ 0.1 gwei ≈ 0.00123 BNB：
+**部署交易**：`forge script script/Deploy.s.sol --rpc-url bsc-testnet --broadcast --verify --private-key <deployer>`（broadcast 产物 `broadcast/Deploy.s.sol/97/run-latest.json`），部署者 `0x463c...21D3`，7 笔交易全部上链成功（5 笔 CREATE + 2 笔角色授权）：
 
-| 合约 | 部署交易 | 地址 |
-|---|---|---|
-| FlapTaxTokenV3 impl | `0xeb1b82a70a10baf270b29b9c15dc9dc7fd5838ae35c49a685a078accf5f8dd1b` | `0x0eB92ffcA94EB424C6fbD93698dB9490533A0AcA` |
-| TokenFactory | `0x850be091da8ef1583ea2732206473a1ddc6d86238ad2372b7a5140c4336cb415` | `0xab363c6410296A3f39D01d278A34adA9517A5e25` |
-| PRESALE template | `0xc5b97a7314cb32d8d56afcf368fc4aaf3013459b02c89e73a10ae609c9bd0cc4` | `0x48a4a9f357Ac0AE1d4118Efc6e0Be320D3f103eC` |
-| PresaleFactory | `0xd5be11233b48c8369330a5cba1823817fcc553ecc07972e7544716af4feb8295` | `0x236a6752323324F23301958b06B9b17cB8151294` |
-| CoordinatorFactory | `0x74c7bc164697e684e049be4b0c185ae93786f27b482b553108f60ff15418f4b0` | `0xfb5a2029D8464C3dFB4baEaD9ee44853E2f9cA45` |
-| TokenFactory 授权 | `0x82f746357d4fb2236bf64c25edee9cfd9339d8c14536a3c5dcaaf4058b34d0a9` | — |
-| PresaleFactory 授权 | `0xe0f7cba9c3a01f1632ed76b2770735ba2f5626a52648f56088adf540adf4736d` | — |
+| 合约 | 部署交易 | 地址 | BscScan 验证 |
+|---|---|---|---|
+| FlapTaxTokenV3 impl | `0xdbca79131d240cb080ba5fc012fc44bd2ea82da634972b1d3815c7814c74e4c6` | `0x835Eb5BB068ccb1DB72Ca58f18466fab06A08ED8` | ✅ Pass |
+| TokenFactory | `0xa1dd8ed72363dd731b135d7bfe7655db5665295646db6e352a2f3e3eb8e9b939` | `0x1d60B1DD9dF8d4FE7EE0B99d48333C06C01912Ca` | ✅ Pass |
+| PRESALE template | `0x0e30ca2a28b015a880bb4088a3892203eb2bbd95473ff00f2442d947ba29250f` | `0xfC438a24e0B952A77e529D68D9d624b75A8A3267` | ✅ Pass |
+| PresaleFactory | `0x77afee32c66acfa459602398655c33d9a278c2453d12591a0d66ce8d37da6ad2` | `0x6Fece4eb39652c7B8Af3e9Ce138AacC96aA74199` | ✅ Pass |
+| CoordinatorFactory | `0x8218cfdadd3fb6f98400737f585a02c14c255cc79c326c23d100dafa567c41ca` | `0xf157006eBA5b5d234A71f6d949B4e944458e619F` | ✅ Pass |
+| TokenFactory 授权 | `0x2fcd956cb1df044a494e8072db4b5255875209e60c86c3a70f924783fc69752c` | — | — |
+| PresaleFactory 授权 | `0xcbca8d9afa7e94f491257a90287ecba03406e2e4c19d1c638373197f4813a0ed` | — | — |
 
 **接线核验（全通过）**：
-- 5 合约均有代码；两工厂 `hasRole(COORDINATOR_ROLE, coordinator) == true`
-- `tokenFactory.flapImplementation == 0x0eB9...0AcA`、`presaleFactory.presaleImplementation == 0x48a4...103eC`
+- 5 合约源码验证 5/5 `Pass - Verified`（Etherscan V2 API，chain 97）
+- 两工厂 `hasRole(COORDINATOR_ROLE, coordinator) == true`
+- `tokenFactory.flapImplementation == 0x835E...8ED8`、`presaleFactory.presaleImplementation == 0xfC43...3267`
 - `coordinator.routerAddress == 0xD99D...50D1`、`creationFee == 0.005 BNB`、`reservationFee == 0.01 BNB`、`factoryEnabled == true`
 
-**冒烟测试（testnet 分支特性端到端，全通过）**——核心验证点：**vestingDelay 下限 1 分钟生效**（5 分钟周期配置成功，main 部署上同参数会被 `InvalidVestingDelay` 拒绝）：
+**冒烟测试（feat/presale-duration 特性全场景端到端，全部通过）**——角色：创建者（张三 `0x027D...B421`）、散户（李四 `0xf999...f25Be`）、路人（部署者钱包，非 owner 非参与者）。所有测试币地址尾号 8888（CREATE2 靓号体系验证）：
 
-| 步骤 | 交易 | 结果 |
-|---|---|---|
-| createToken（VST 测试币） | `0x66cbbb6350ce6be24062a41467f07ee78b41ce99ba1bb8a9a1d1694a19c04412` | token `0x1a29af77a57600a392794fa4e879e1893af7feaf`，presale `0x2359557cc443d0a0b662fdfd0f141d239cc03c22`；全量 1M 入托管仓，token 所有权自动交托管仓 |
-| setupPresale（vestingDelay=300s=5 分钟，rate=20） | `0xcc7ce4063ebf14991ca71d4a32de60b4e552dfc4dfe8e9b40ff6158c25924bbf` | **配置成功**：链上读回 `vestingDelay == 300`、`vestingRate == 20` —— 1 分钟下限验证通过 |
-| openPresale | `0x236ed7974dd091590efcbd99c83dec5bd12421685132456777e54d01e78d49ac` | 认购开放 |
-| subscribe（散户 0.006 BNB） | `0x122e260dd8ab1d2ad67e9d3406905b4ed0884fc21427673a9b197d558a8eb69f` | 认购成功 |
-| endPresale | `0x224ec3929f7b95b1eae8ab4dcf642448c26e1d7a2859f414c85f8a728362b134` | 达标进待开盘 |
-| launch | `0x9ab0205733a6429d34c557d38b0a2236e726c6612ab89741cc159dd9155e4a63` | 加池成功：`presaleStatus == 3`、token `state == 2`、`owner == 0x0`、`liquidityAdded == true`、pair `0xAdE3B04A961a8852963A8A59A320204529d3003a` |
+| # | 场景 | 关键交易 | 验证点（全部符合预期） |
+|---|---|---|---|
+| 1a | **完整成功链路**（SMK1 `0x9dc1...58888`，软顶恰达 0.15） | createToken `0xc0e0...2c3c6` → setup `0xc5cf...bdce1` → open `0x31cc...76572b` → subscribe 0.15 `0xcb5e...a99c` → endPresale（owner 提前结束）`0xbf41...4d83ba` → launch `0x2abb...bb70a6` | 状态 1→2→3；endTime 锚定 = openPresale 时刻 + 600s（晚开盘不缩水）；pair 储备 2 亿枚 + 0.15 BNB（募资全额入池）；**代币对账守恒：10 亿 = dead 未售销毁 499,999,850 + 池 200,000,000 + 托管 vesting 300,000,150（creator 3 亿 + 李四 150 枚）**；token state=2、owner=0x0；vesting 视图 share=150 枚、claimable=0（周期未到）、nextVestingTime=start+7d；立即 claim 拒 `NothingToClaim` |
+| 1b | **硬顶恰达同笔自动结算**（SMK2 `0x4156...38888`，硬顶 0.1） | subscribe 0.06 `0x2ade...4cb29d` → 超额 0.06 revert `HardcapReached(0x5be90159)` → 恰达 0.04 `0x7cd4...63226` → launch `0x7c71...8aa35` | 0.06 时状态保持 1；超额认购拒收（无部分成交）；**0.04 那笔交易成交同时状态翻 2、endedAt 记录**（达顶即闭市）；结算后 subscribe 拒 `PresaleNotOpen`；launch 后池储备 2 亿枚 + 0.1 BNB |
+| 2 | **到期 force-end 软顶达标**（SMK3 `0x7974...a8888`，窗口 60s） | subscribe 0.02 `0x9146...3be77` → 非owner提前 endPresale revert `PresaleNotExpired(0x3deb266e)` → 到期后路人 endPresale `0xf68d...1e609e` → launch `0xdf97...898981` | **触发权三段验证**：owner 随时可、路人提前拒、路人到期可；force-end 进 2、launch 进 3 全通 |
+| 3 | **到期未达软顶→FAILED→reclaim 双出口**（SMK4 `0x845b...18888`，软顶 0.5 不可达） | force-end `0x3b11...9e9bf2`（零募资）→ relaunch `0x5b49...b61001` → 二轮 force-end `0xed21...2e65b9` → reclaimTokens `0xfee1...8a5052` → relaunch 拒 `EscrowDrained(0x174a9bcf)` | FAILED 态 launch 被状态闸封锁；**relaunch 重开**：状态 4→0、presaleRound 0→1、配置期复活（setSoftCap 0.02 成功）；**reclaimTokens**：10 亿全量回创建者、同笔迁移 state=2、renounce owner=0x0；**双出口互斥**：领取后代币后 relaunch 拒 |
+| 4 | **过期封认购** | 过期后 subscribe `PresaleExpired(0x312c6e32)` | 认购窗口 `[startTime, endTime)` 上界生效；状态 1 时时间闸先于状态闸（时序正确） |
+| 5 | **失败退款 + 跨轮记账安全**（SMK5 `0xbd6c...518888`，软顶 0.5） | subscribe 0.02 → force-end `0x2b9e...b5611` → refund `0xc77e...aee38` → relaunch `0xdde5...e9341` → 二轮 subscribe 0.01+0.01 → endPresale → launch `0x08eb...8a42fc7` → claim `0x9e1b...4594` | **refund 三重语义**：精确退款 0.02 BNB（净额=缴款-gas）、`subscribedTokens` 清零（旧份额作废）、`accumulatedBNB` 归零（重开判据）；二次 refund 拒 `NothingToClaim`；**跨轮铁证：第一轮 20 枚份额退款作废后，第二轮认购 10+10=20 枚，claim 恰得 20 枚 × 20% = 4 枚（1 周期）——旧份额零泄漏** |
+| 6 | **72h 开盘窗口门禁**（SMK6 `0xdac9...f8888`） | subscribe 0.01 恰达软顶 → endPresale → 立即 enforceLaunchDeadline | 拒 `LaunchDeadlineNotReached(0x742e3c2b)`、状态保持 2；72h 后翻 FAILED 的正路径由 forge 单测（`test_EnforceDeadlineFlipsToFailed` 等）与 fuzz 覆盖——真实链等待 72h 不具操作性 |
+
+**此前特性回归**（2026-09-03 版本已验，本次抽查未回退）：vestingDelay 1 分钟下限（场景 5/6 用 60s 周期成功）、8888 尾号（全部 6 个测试币）、税配置即时生效（launch 后 state=2）。
+
+**历史冒烟记录（2026-09-03 部署，已被本次部署取代，地址见 7.8 旧表）**：VST 测试币全链路（createToken `0x66cb...4412` → setupPresale(300s/20) `0xcc7c...24bbf` → openPresale `0x236e...49ac` → subscribe `0x122e...8eb69f` → endPresale `0x224e...2b134` → launch `0x9ab0...4a63`）。
 
 **已知存量（旧部署，与本版行为不同）**：`0xb940...7F37`（SillyFunc）等旧代币已按新行为手动迁移完成（state=2），但 owner 仍在创建者手里（未 renounce，纯装饰性差异）；旧代币不在新 coordinator 的列表里，见 7.8。
