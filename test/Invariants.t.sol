@@ -116,18 +116,43 @@ contract Handler {
         if (tokens.length == 0) return;
         PRESALE p = PRESALE(payable(ghostPresale[tokens[tokenIdx % tokens.length]]));
         if (p.presaleStatus() != 1) return;
+        if (block.timestamp >= p.endTime()) return; // 到期封认购（[startTime, endTime) 窗口）
         address buyer = actors[actorSeed % actors.length];
         vm.deal(buyer, 1000 ether);
         vm.prank(buyer);
         p.subscribe{value: 0.05 ether + (amtSeed % 50) * 0.01 ether}();
     }
 
-    function endPresale(uint256 tokenIdx) external {
+    function endPresale(uint256 tokenIdx, uint256 actorSeed) external {
         if (tokens.length == 0) return;
         PRESALE p = PRESALE(payable(ghostPresale[tokens[tokenIdx % tokens.length]]));
         if (p.presaleStatus() != 1) return;
-        vm.prank(p.owner());
+        // 触发权：owner 任意时刻；他人仅到期后（forward-only warp 模拟时间流逝）
+        address caller = actors[actorSeed % actors.length];
+        if (caller != p.owner() && block.timestamp < p.endTime()) return;
+        vm.prank(caller);
         p.endPresale();
+    }
+
+    /// @dev 72h 兜底：状态 2 超 LAUNCH_DEADLINE 未开盘，任何人翻 FAILED（无代币流）
+    function enforceLaunchDeadline(uint256 tokenIdx, uint256 actorSeed) external {
+        if (tokens.length == 0) return;
+        PRESALE p = PRESALE(payable(ghostPresale[tokens[tokenIdx % tokens.length]]));
+        if (p.presaleStatus() != 2) return;
+        if (block.timestamp < p.endedAt() + p.LAUNCH_DEADLINE()) return; // 未超时不开门
+        vm.prank(actors[actorSeed % actors.length]);
+        p.enforceLaunchDeadline();
+    }
+
+    /// @dev 失败重开：须全员退款完毕（accumulatedBNB == 0）且仓非空，回配置期（无代币流）
+    function relaunchPresale(uint256 tokenIdx) external {
+        if (tokens.length == 0) return;
+        PRESALE p = PRESALE(payable(ghostPresale[tokens[tokenIdx % tokens.length]]));
+        if (p.presaleStatus() != p.STATUS_FAILED()) return;
+        if (p.accumulatedBNB() != 0) return; // RefundsOutstanding 前置
+        if (IERC20Lite(coordinator.getPresaleToken(address(p))).balanceOf(address(p)) == 0) return; // EscrowDrained 前置
+        vm.prank(p.owner());
+        p.relaunchPresale();
     }
 
     function launch(uint256 tokenIdx) external {
@@ -229,6 +254,7 @@ contract Handler {
             minLiquidityAmount: 0.1 ether,
             softCap: hardSoftCap ? 3 ether : 0.1 ether, // 高线 → 失败路径；低线 → 成功路径
             startTime: 0,
+            duration: 30 days,
             vestingDelay: 7 days,
             vestingRate: 10,
             slippage: 0,

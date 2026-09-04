@@ -1,7 +1,7 @@
 # 前端对接文档 — Token Launchpad（BSC 测试网）
 
 > 合约版本：2026-09-03 部署（testnet 分支：vestingDelay 下限 1 分钟；含"领取即上线"改造：`claimAllTokens` 内嵌迁移 + 全出口统一 renounce）
-> ⚠️ 代码已前进（未部署）：本分支代码现含主网口径 `maxSupply = 1e9 ether`（10 亿枚）与清算阈值 5e6/1e7、管理员可配置分配比例（`setAllocation`，默认 30/20/50）、`softCap ≤ hardcap` 校验；**链上当前部署仍为旧版（100 万枚、固定 30/20/50、无软顶硬顶校验），重新部署前一切以读链为准**
+> ⚠️ 代码已前进（未部署）：本分支代码现含主网口径 `maxSupply = 1e9 ether`（10 亿枚）与清算阈值 5e6/1e7、管理员可配置分配比例（`setAllocation`，默认 30/20/50）、`softCap ≤ hardcap` 校验、**预售时长体系**（`duration` 配置、认购窗口 `[startTime, endTime)`、硬顶恰达同笔自动结算、到期后任何人 force-end、72h 未开盘兜底 `enforceLaunchDeadline`、失败后双出口 `reclaimTokens` / `relaunchPresale`）；**链上当前部署仍为旧版（100 万枚、固定 30/20/50、无软顶硬顶校验、无时长体系），重新部署前一切以读链为准**
 > 部署验证：链上冒烟测试全绿（发币 → 一键领取 → 税生效 → 池转账），交易哈希见附录 A
 
 ---
@@ -117,9 +117,11 @@ out/FlapTaxTokenV3.sol/FlapTaxTokenV3.json
 | ① | `coordinator.createToken(config, salt)` | 创建者 | `≥ creationFee` | 工厂启用 |
 | ② | `coordinator.setupPresale(token, pConfig)` | 创建者 | 可选（创建者购买注资） | 未配置过（一次性） |
 | ③ | `presale.openPresale()` | 创建者 | — | `presaleStatus == 0` |
-| ④ | `presale.subscribe()` × N | 散户 | 认购 BNB | `presaleStatus == 1` 且过 `startTime` |
-| ⑤ | `presale.endPresale()` | 创建者 | — | `presaleStatus == 1` |
-| ⑥ | `presale.launch()` | 创建者 | — | `presaleStatus == 2` 且 `accumulatedBNB ≥ minLiquidityAmount` |
+| ④ | `presale.subscribe()` × N | 散户 | 认购 BNB | `presaleStatus == 1` 且 `startTime ≤ now < endTime` |
+| ⑤ | `presale.endPresale()` | 创建者（随时）/ 任何人（过 `endTime` 后） | — | `presaleStatus == 1` |
+| ⑥ | `presale.launch()` | 创建者 | — | `presaleStatus == 2`、`accumulatedBNB ≥ minLiquidityAmount` 且未过 72h（见下） |
+
+`endTime = max(openPresale 时刻, startTime) + duration`：晚开盘不缩水认购窗口。**硬顶恰达自动结算**：某笔认购使 `accumulatedBNB` 恰好等于 `hardcap` 时，该笔交易成交后同笔完成结束判定（1→2，`emit PresaleEnded`）——达硬顶即闭市，无需等 ⑤；超额认购照旧 revert（`HardcapReached`，调小金额重试）。**72h 开盘窗口**：进入状态 2 后 72 小时（`LAUNCH_DEADLINE` 常量）内未 `launch()`，任何人可调 `presale.enforceLaunchDeadline()` 翻转为发行失败（状态 4）开放退款——前端应在进入状态 2 后展示 72h 倒计时。
 
 `launch()` 一笔内自动：`startMigration → 加池(20% 底池份额 + 全部募资 BNB, LP 死锁 0xdead) → 未售出预售份额销毁(0xdead) → 创建者购买(若注资) → finalizeMigration(税生效) → renounceOwnership`。**无需任何手动移交/迁移操作。**
 
@@ -132,14 +134,26 @@ out/FlapTaxTokenV3.sol/FlapTaxTokenV3.json
 | `claim()` | 散户/创建者 | 按 vesting 周期领取（30% 创建者份额 + 50% 认购份额共用本函数） |
 | `withdrawRemainingBNB()` | 创建者 | 提取路由器找零等残留 BNB |
 
-### 2.3 分支：预售失败（未达 softCap）
+### 2.3 分支：预售失败（未达 softCap / 72h 未开盘）
 
-`endPresale` 时 `accumulatedBNB < softCap` → `presaleStatus == 4`（发行失败终态）：
+进入 `presaleStatus == 4`（发行失败）的四种入口：
+
+| 入口 | 触发者 | 条件 |
+|---|---|---|
+| 手动 `endPresale()` | 创建者（随时） | 状态 1 且 `accumulatedBNB < softCap` |
+| 到期 force-end `endPresale()` | 任何人 | 状态 1、过 `endTime` 且 `accumulatedBNB < softCap` |
+| 72h 超时 `enforceLaunchDeadline()` | 任何人 | 状态 2 超 `LAUNCH_DEADLINE`（72h）未 `launch()` |
+| 硬顶自动结算（极端配置） | —（同笔 subscribe） | 恰达 hardcap 且 `accumulatedBNB < softCap`（正常配置 `softCap ≤ hardcap` 下不可达） |
+
+失败后**双出口**（互斥，先到先得）：
 
 | 动作 | 调用者 | 说明 |
 |---|---|---|
-| `refund()` | 各认购者 | 精确取回本人全部缴款（按 `contributions` 账本，无截留） |
-| `reclaimTokens()` | 创建者 | 回收全部代币；**同笔内嵌迁移 + renounce**（领取即上线） |
+| `refund()` | 各认购者 | 精确取回本人全部缴款（按 `contributions` 账本，无截留）；**退款即作废本人代币份额**（`subscribedTokens` 清零、`accumulatedBNB` 递减），防止跨轮记账 |
+| `reclaimTokens()` | 创建者 | 回收全部代币；**同笔内嵌迁移 + renounce**（领取即上线，结局等同纯发币模式）；领取后仓空，不可再重开 |
+| `relaunchPresale()` | 创建者 | 回配置期（4→0）重开新一轮：须**全员退款完毕**（`accumulatedBNB == 0`）且仓非空；条款可重设（配置期 setter 复活）或沿用旧条款直接 `openPresale()`（重新锚定 `endTime`）；`presaleRound` +1 供事件分段 |
+
+> **前端注意**：状态 4 下 `accumulatedBNB` / `totalSubscribedTokens` 随退款递减（退款作废份额的副作用）——历史募资额请以 `PresaleFailed(raisedBNB, softCap)` 事件快照为准；重开进度的软顶对比用"当前 `accumulatedBNB` vs `softCap`"依然是正确口径。状态 4 为纯退款/回收/重开态：翻 FAILED 后**无降额开盘**（launch 通道永久关闭）。
 
 ### 2.4 地址规则：全平台尾号 8888（CREATE2 靓号）
 
@@ -188,7 +202,7 @@ struct TokenConfig {
 - 代币固定 **18 位小数**、固定总量（读 `token.maxSupply()`，**前端严禁硬编码**；main 代码已恢复主网口径 `1e9 ether` = 10 亿枚，链上当前部署仍为 `1e6 ether` = 100 万枚测试口径，以读链为准）
 - 代币支持 ERC20Permit（`permit` 签名授权可用）
 
-### 3.2 `PresaleConfig`（预售配置，10 字段，仅 `setupPresale` 一次性生效）
+### 3.2 `PresaleConfig`（预售配置，11 字段，仅 `setupPresale` 一次性生效）
 
 ```solidity
 struct PresaleConfig {
@@ -200,6 +214,8 @@ struct PresaleConfig {
     uint256 softCap;              // 认购成功线（BNB wei）：endPresale 时未达 → 发行失败开退款。
                                   //   必须且会被校验 ≥ minLiquidityAmount
     uint256 startTime;            // 认购开始时间戳（秒），0 = 立即
+    uint256 duration;             // 认购时长（秒）：1 分钟 ~ 30 天。endTime = max(openPresale 时刻,
+                                  //   startTime) + duration，认购窗口为 [startTime, endTime)
     uint256 vestingDelay;         // vesting 周期长度（秒）：testnet 分支 1 分钟 ≤ x ≤ 90 天（主网口径 7 天）
     uint256 vestingRate;          // 每周期释放百分比：5 ≤ x ≤ 20
     uint256 slippage;             // 加池滑点保护 bps，0 ≤ x ≤ 1000（0 = 用默认 5%）
@@ -216,6 +232,7 @@ struct PresaleConfig {
 | `maxBuyPerWallet` | > 0 | `InvalidMaxBuyPerWallet` |
 | `minLiquidityAmount` | > 0 | `ZeroMinLiquidity` |
 | `softCap` | ≥ `minLiquidityAmount` 且 ≤ `hardcap`（hardcap > 0 时） | `SoftCapTooLow` / `SoftCapExceedsHardcap` |
+| `duration` | 1 分钟 ~ 30 天（testnet 分支标定；主网口径须收紧下限） | `InvalidDuration` |
 | `vestingDelay` | 1 分钟 ~ 90 天（testnet 分支标定；主网口径 7 天） | `InvalidVestingDelay` |
 | `vestingRate` | 5 ~ 20 | `InvalidVestingRate` |
 | `slippage` | ≤ 1000 | `SlippageTooHigh` |
@@ -246,11 +263,11 @@ struct PresaleConfig {
 
 | 值 | 含义 | 允许的下一步 |
 |---|---|---|
-| 0 | 创建/配置期 | `setupPresale`（协调器）/ `claimAllTokens` / `openPresale` |
-| 1 | 认购中 | `subscribe` / `endPresale` |
-| 2 | 认购结束（达 softCap） | `launch` |
+| 0 | 创建/配置期 | `setupPresale`（协调器，仅首轮）/ `claimAllTokens` / `openPresale` |
+| 1 | 认购中 | `subscribe`（窗口 `[startTime, endTime)`）/ `endPresale`（创建者随时；任何人过 `endTime` 后）——恰达 hardcap 的 `subscribe` 同笔自动结算离开本状态 |
+| 2 | 认购结束（达 softCap） | `launch`（72h 内）/ `enforceLaunchDeadline`（超 72h 任何人，翻 FAILED） |
 | 3 | 已开盘 | `claim` / `withdrawRemainingBNB`（未售出份额已在 `launch` 时销毁，无提取入口） |
-| 4 | 发行失败（STATUS_FAILED） | `refund`（散户）/ `reclaimTokens`（创建者） |
+| 4 | 发行失败（未达 softCap 或 72h 未开盘） | `refund`（散户）/ `reclaimTokens`（创建者）/ `relaunchPresale`（创建者，须全员退款完毕，回状态 0 重开新一轮） |
 
 ### 4.2 代币 `token.state()`（PoolState，克隆代理上读）
 
@@ -281,8 +298,11 @@ owner=托管仓              owner=0x0（出口交易内自动 renounce）
 | `AllocationUpdated(uint256,uint256,uint256)` | `0x21c55dfccedf7a8f464081b4c32abf493ebe4c9a653d37fd29365b3775a79cfd` | 分配比例变更（coordinator 上监听，变更后更新本地缓存的比例展示） |
 | `PoolStateChanged(uint8,uint8)` | `0x415234d2d8252539e96fb6c66ec4b3a9fd441ef58da0de24639c3e655503ec2d` | 上线信号（token 地址上监听；0→1→2 连续两条 = 出口交易执行） |
 | `AllTokensClaimed(address,uint256,uint256)` | `0x9beb1609b7ce6d449a3807626b3c2a8fdfd28db995c202b8ab5ec5c6820b950d` | 纯发币领取完成 |
-| `Subscribed(address,uint256,uint256)` | `0xf94991dcbea6e8ac439cbc93bd9c62a4d39f04e0ad656df9a703f13552c2787f` | 认购流水 |
-| `PresaleFailed(uint256,uint256)` | `0xd0ded4316a63c0a62ce3e3bcc0c0feac58db8ad9c7a81ee1c347a0ec94bea5cc` | 发行失败信号 |
+| `Subscribed(address,uint256,uint256)` | `0xf94991dcbea6e8ac439cbc93bd9c62a4d39f04e0ad656df9a703f13552c2787f` | 认购流水（恰达 hardcap 的同笔交易内会紧跟 `PresaleEnded` 或 `PresaleFailed`） |
+| `PresaleEnded()` | `0x1eb1561f8507eb9bc6988331f66f369e75710f2b4b678ad5b4a52454b6636f5f` | 认购达标结束（达 softCap 进状态 2；可由恰达 hardcap 的 subscribe 同笔触发） |
+| `PresaleFailed(uint256,uint256)` | `0xd0ded4316a63c0a62ce3e3bcc0c0feac58db8ad9c7a81ee1c347a0ec94bea5cc` | 发行失败信号（`raisedBNB` 为判定时刻快照；此后的退款会递减链上 `accumulatedBNB` 视图） |
+| `LaunchDeadlineExceeded(uint256,uint256)` | `0xf2acd1a6dd7963e4ed21f2d5e599e5d25bbed59ad4eadeab5c88d4fb81fdecbb` | 72h 未开盘翻失败（状态 2→4，`enforceLaunchDeadline` 触发） |
+| `PresaleRelaunched(uint256)` | `0x7599261cb5ce6b399b18d692fab9bac6b32b0847309d1e2bb09000bbb7e2261f` | 失败重开新一轮（4→0；`round` 计数，两轮同名事件以 `round` 分段去重） |
 | `LaunchFinalized(uint256,uint256,uint256)` | `0x263b23d9b2cab56070be836744ca814236a9e4ea7a3843341ec410490c2940c2` | 预售开盘完成 |
 | `UnsoldTokensBurned(uint256,uint256)` | `0xced35ff772e9afd2c1a34f79c598da2231e0efa7c39d83b54e45096ac5d23bd1` | 加池时未售出预售份额销毁（`launch` 同笔交易内，紧跟 `LiquidityAdded`） |
 | `Refunded(address,uint256)` | `0xd7dee2702d63ad89917b6a4da9981c90c4d24f8c2bdfd64c604ecae57d8d0651` | 失败退款 |
@@ -399,6 +419,12 @@ const mcapUSD   = priceBNB * bnbUsd * Number(totalSupply) / 1e18
 | `0xf525e320` | InvalidStatus | 状态不对（各类状态守卫兜底） | 当前状态不可执行该操作 |
 | `0x7963e2b5` | PresaleNotOpen | 认购未开放 | 预售未开放 |
 | `0x4e16195c` | PresaleNotStarted | 早于 startTime | 预售尚未开始 |
+| `0x312c6e32` | PresaleExpired | 过 endTime 后 subscribe | 预售已到期 |
+| `0x3deb266e` | PresaleNotExpired | 非 owner 在到期前调 endPresale | 预售尚未到期，仅创建者可提前结束 |
+| `0x76166401` | InvalidDuration | duration 超出 1 分钟 ~ 30 天（testnet 分支标定） | 认购时长须在 1 分钟 ~ 30 天之间 |
+| `0x742e3c2b` | LaunchDeadlineNotReached | 状态 2 未满 72h 就调 enforceLaunchDeadline | 尚在开盘窗口期内 |
+| `0x0d3e2916` | RefundsOutstanding | 退款未清零就调 relaunchPresale | 须等待全部认购者退款完毕 |
+| `0x174a9bcf` | EscrowDrained | 代币已领取（仓空）后调 relaunchPresale | 代币已回收，无法重开 |
 | `0x7c946ed7` | ZeroValue | subscribe 附 0 BNB | 请输入金额 |
 | `0xc2f5625a` | AmountTooSmall | 换算代币数为 0 | 金额过小 |
 | `0xd4556c36` | PresaleSoldOut | 超出预售份额（maxPresaleTokens） | 已售罄 |
@@ -454,7 +480,7 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 
 ### 7.5 时间相关参数用秒
 
-`taxDuration` / `antiFarmerDuration` / `vestingDelay` / `startTime` 全部为**秒级时间戳/时长**，前端用 `ethers.toUtf8`/`BigInt` 传整秒，勿传毫秒。
+`taxDuration` / `antiFarmerDuration` / `vestingDelay` / `startTime` / `duration` 全部为**秒级时间戳/时长**，前端用 `ethers.toUtf8`/`BigInt` 传整秒，勿传毫秒。`duration` 是**时长**（非绝对时间戳）：`endTime` 在 `openPresale()` 那笔交易内由合约锚定，前端无法也无需预填。
 
 ### 7.6 金额单位
 
@@ -467,7 +493,10 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 | createToken | ~4,430,000 | 0.00044 |
 | claimAllTokens | ~124,000 | 0.000012 |
 | setupPresale | ~170,000 | 0.000017 |
-| subscribe | ~70,000 | 0.000007 |
+| subscribe | ~70,000（普通）/ ~130,000（含硬顶自动结算） | 0.000007 |
+| endPresale | ~28,000 | 0.000003 |
+| enforceLaunchDeadline | ~26,000 | 0.0000026 |
+| relaunchPresale | ~24,000（不含重设条款） | 0.0000024 |
 | launch | ~500,000 | 0.00005 |
 
 钱包至少留 0.01 BNB 余量；gas 价波动时前端读 `ethers.getFeeData()` 估算。
@@ -504,10 +533,10 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 
 ### 7.9 其他细节
 
-- `setupPresale` 是**一次性**的：条款配置后不可修改（`AlreadyConfigured`），前端提交前给确认弹窗
-- `subscribe` 的硬顶/限购/售罄在**同笔交易内原子校验**，无需前端预检（但预读做按钮置灰体验更好）
+- `setupPresale` 是**一次性**的：条款配置后不可修改（`AlreadyConfigured`），前端提交前给确认弹窗。**重开新一轮**（`relaunchPresale`）不经过 coordinator：创建者直接调 presale 实例的配置类 setter（`setPresaleTerms` 等，此时 `onlyConfigPhase` 已复活）重设条款，或沿用旧条款直接 `openPresale()`——`tokenConfigured` 一次性闸只约束 coordinator 路径，不受直调影响
+- `subscribe` 的硬顶/限购/售罄在**同笔交易内原子校验**，无需前端预检（但预读做按钮置灰体验更好）；恰达硬顶的那笔交易会**同笔结束预售**（事件序列 `Subscribed` → `PresaleEnded`），前端订阅 `PresaleEnded` 即可刷新状态，无需轮询
 - vesting 领取公式：`已释放 = 份额 × vestingRate × 已过周期数 / 100`，周期 = `(now - vestingStart) / vestingDelay`；开盘后下一个周期边界前可领为 0（正常，显示"下期释放时间"用 `getUserVestingStatus` 的 `nextVestingTime`）
-- `claim` / `refund` 对散户**免 owner 校验**（各领各的）；`claimAllTokens` / `launch` / `reclaimTokens` 仅创建者
+- `claim` / `refund` 对散户**免 owner 校验**（各领各的）；`claimAllTokens` / `launch` / `reclaimTokens` / `relaunchPresale` 仅创建者；`endPresale` / `enforceLaunchDeadline` 为受控公开（见 2.2/2.3 触发权表）
 - 代币克隆实例地址即 ERC20 合约地址，`name/symbol/decimals/balanceOf/permit` 全套标准接口可用
 
 ---
@@ -542,7 +571,10 @@ OZ 标准错误：`Ownable: caller is not the owner`（string revert，非 4 字
 | `getVestedAmount(user)` | 当前可领 vesting 数量 |
 | `getUserVestingStatus(user)` | `(share, claimable, claimed, nextVestingTime)` |
 | `presaleTokenPrice()` / `softCap()` / `hardcap()` / `maxBuyPerWallet()` / `startTime()` | 条款展示 |
-| `accumulatedBNB()` / `totalSubscribedTokens()` | 进度条（配合 softCap/maxPresaleTokens） |
+| `presaleDuration()` / `endTime()` | 认购窗口（倒计时：`endTime - now`；进度百分比建议以 `min(now, endTime) - startTime` 计算） |
+| `endedAt()` / `LAUNCH_DEADLINE()` | 状态 2 的 72h 开盘窗口倒计时（`endedAt + LAUNCH_DEADLINE - now`） |
+| `presaleRound()` | 当前轮次（0 = 首轮；重开 +1，跨轮事件分段去重锚点） |
+| `accumulatedBNB()` / `totalSubscribedTokens()` | 进度条（配合 softCap/maxPresaleTokens）；**状态 4 下随退款递减**（历史快照看 `PresaleFailed` 事件） |
 | `creatorShare()` / `poolShare()` / `presaleShare()` | 本托管仓实例的冻结份额展示（setupPresale 时刻锁定，不随工厂比例调整变化） |
 | `vestingDelay()` / `vestingRate()` / `vestingStart()` | vesting 说明 |
 | `subscribedTokens(user)` / `contributions(user)` / `claimedTokens(user)` | 个人持仓页 |

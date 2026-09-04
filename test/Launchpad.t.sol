@@ -56,7 +56,7 @@ contract LaunchpadTest is Test {
         presale = new PRESALE();
         presale.initialize(address(this), address(router));
         presale.configureLaunch(true, address(this), creatorShare, poolShare, presaleShare);
-        presale.setPresaleTerms(1e15, presaleShare, 1e8 ether, 0, 0.1 ether, 0); // 0.001 BNB/token
+        presale.setPresaleTerms(1e15, presaleShare, 1e8 ether, 0, 0.1 ether, 0, 30 days); // 0.001 BNB/token
         presale.setVestingConfig(7 days, 10);
         presale.setCoinAndPair(address(token), pair);
 

@@ -102,7 +102,7 @@ contract PresaleSecurityTest is Test {
 
         // 绕过协调器直调 setPresaleTerms 抬高 minLiquidityAmount（不变量被破坏的根源路径）
         vm.prank(creator);
-        presale.setPresaleTerms(1e15, 5e8 ether, 1e8 ether, 0, 5 ether, 0);
+        presale.setPresaleTerms(1e15, 5e8 ether, 1e8 ether, 0, 5 ether, 0, 30 days);
 
         vm.prank(creator);
         vm.expectRevert(SoftCapTooLow.selector); // 开盘终检拦截
@@ -122,7 +122,7 @@ contract PresaleSecurityTest is Test {
     function test_RevertWhen_SetPresaleTermsWithZeroMinLiquidity() public {
         vm.prank(creator);
         vm.expectRevert(ZeroMinLiquidity.selector);
-        presale.setPresaleTerms(1e15, 5e8 ether, 1e8 ether, 0, 0, 0);
+        presale.setPresaleTerms(1e15, 5e8 ether, 1e8 ether, 0, 0, 0, 30 days);
     }
 
     /// 回归 4：任何路径写出 minLiquidityAmount=0（含双 0 组合）后，openPresale 终检必须兜底拦截
@@ -158,6 +158,7 @@ contract PresaleSecurityTest is Test {
             minLiquidityAmount: 0.1 ether,
             softCap: 0.1 ether,
             startTime: 0,
+            duration: 30 days,
             vestingDelay: 7 days,
             vestingRate: 10,
             slippage: 0,

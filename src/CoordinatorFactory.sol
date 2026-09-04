@@ -267,7 +267,8 @@ contract CoordinatorFactory is AccessControl, ReentrancyGuard {
             presaleConfig.maxBuyPerWallet,
             presaleConfig.hardcap,
             presaleConfig.minLiquidityAmount,
-            presaleConfig.startTime
+            presaleConfig.startTime,
+            presaleConfig.duration
         );
         // vesting 恒开启（产品规则），仅节奏可配
         p.setVestingConfig(presaleConfig.vestingDelay, presaleConfig.vestingRate);

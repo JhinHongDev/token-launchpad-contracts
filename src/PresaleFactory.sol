@@ -21,6 +21,7 @@ struct PresaleConfig {
     uint256 minLiquidityAmount;
     uint256 softCap; // 认购成功线：必须 ≥ minLiquidityAmount，否则 endPresale 判失败开放退款
     uint256 startTime;
+    uint256 duration; // 认购时长（秒）：openPresale 锚定 endTime = max(开盘时刻, startTime) + duration
     uint256 vestingDelay;
     uint256 vestingRate;
     uint256 slippage;

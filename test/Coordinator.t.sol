@@ -389,6 +389,7 @@ contract CoordinatorTest is Test {
             minLiquidityAmount: 0.1 ether,
             softCap: 0.5 ether, // 常规路径募集 1 BNB > 软顶；失败路径用例会单独抬高
             startTime: 0,
+            duration: 30 days,
             vestingDelay: 7 days,
             vestingRate: 10,
             slippage: 0,

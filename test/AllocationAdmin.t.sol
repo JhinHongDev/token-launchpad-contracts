@@ -4,7 +4,7 @@ pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
 import {FlapTaxTokenV3} from "src/lib/token/FlapTaxTokenV3.sol";
-import {PRESALE, SoftCapExceedsHardcap} from "src/Presale.sol";
+import {PRESALE, SoftCapExceedsHardcap, InvalidStatus} from "src/Presale.sol";
 import {CoordinatorFactory, InvalidAllocation} from "src/CoordinatorFactory.sol";
 import {TokenFactory, TokenConfig} from "src/TokenFactory.sol";
 import {PresaleFactory, PresaleConfig} from "src/PresaleFactory.sol";
@@ -231,14 +231,15 @@ contract AllocationAdminTest is Test {
         vm.prank(creator);
         coordinator.setupPresale(tokenB, _cfg(0.5 ether, 0.5 ether)); // 等值：合法
 
-        // 走通完整生命周期（认购恰好达双顶 → 开盘）
+        // 走通完整生命周期（认购恰好达双顶 → 同笔自动结算进 2 → 开盘）
         vm.prank(creator);
         saleB.openPresale();
         vm.prank(alice);
         saleB.subscribe{value: 0.5 ether}();
+        assertEq(saleB.presaleStatus(), 2, "reached both caps auto-settled");
         vm.prank(creator);
+        vm.expectRevert(InvalidStatus.selector); // 状态 2 下 endPresale 已不可再调
         saleB.endPresale();
-        assertEq(saleB.presaleStatus(), 2, "reached both caps");
         vm.prank(creator);
         saleB.launch();
         assertEq(saleB.presaleStatus(), 3);
@@ -302,6 +303,7 @@ contract AllocationAdminTest is Test {
             minLiquidityAmount: 0.1 ether,
             softCap: softCap,
             startTime: 0,
+            duration: 30 days,
             vestingDelay: 7 days,
             vestingRate: 10,
             slippage: 0,

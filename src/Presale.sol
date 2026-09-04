@@ -48,6 +48,12 @@ error ZeroMinLiquidity();
 error CreatorBuyTooLarge();
 error ZeroCreatorBuyValue();
 error CreatorBuyLocked();
+error InvalidDuration();
+error PresaleExpired();
+error PresaleNotExpired();
+error LaunchDeadlineNotReached();
+error RefundsOutstanding();
+error EscrowDrained();
 
 /// @notice 代币迁移操作接口（FlapTaxTokenV3 最小子集）
 interface ITokenMigration {
@@ -65,15 +71,23 @@ interface ITokenMigration {
 ///       迁移三步 + renounceOwnership —— 领取即上线，此后创建者可自由分发或去 DEX 加池/交易
 ///       （入池与否、数量、时机均由创建者决定）
 ///     - 预售模式（presaleEnabled=true）：30% 创建者 / 20% 底池 / 50% 预售，散户 BNB 认购代币份额，
+///       认购窗口 [startTime, endTime)（endTime = max(开盘时刻, startTime) + duration，openPresale 锚定）；
+///       恰达 hardcap 的认购同笔结算结束，到期后任何人可 force-end（endPresale），进状态 2 后
+///       72 小时未开盘任何人可 enforceLaunchDeadline 翻失败开放退款；
 ///       launch() 自动完成 startMigration → 加池(LP 死锁 0xdead) → 未售出预售份额销毁(0xdead)
 ///       → finalizeMigration → renounceOwnership
-///     - 失败终态（STATUS_FAILED=4）：endPresale 时未达 softCap 则宣告发行失败，散户经 refund()
-///       精确取回缴款、创建者经 reclaimTokens() 回收代币（同样内嵌迁移，不残留锁池状态），其余功能全部封锁
+///     - 失败态（STATUS_FAILED=4）：结束认购时未达 softCap（手动 endPresale / 到期 force-end /
+///       72h 超时）宣告发行失败。散户经 refund() 精确取回缴款（退款即作废本人代币份额，
+///       accumulatedBNB 归零 = 全员退清）；创建者双出口：reclaimTokens() 回收代币（同笔内嵌迁移，
+///       结局即纯发币）或 relaunchPresale() 回配置期重开新一轮（须全员退清，两出口互斥）
 ///     迁移前提：token 所有权自 createToken 起在本合约（迁移函数仅 owner 可调），各出口完成时 renounce。
 contract PRESALE is Ownable, ReentrancyGuard {
     uint256 private constant BPS_DENOMINATOR = 10000;
     uint256 private constant DEFAULT_SLIPPAGE = 500; // 5%
-    uint256 public constant STATUS_FAILED = 4; // 发行失败终态：开放 refund()/reclaimTokens()
+    uint256 public constant STATUS_FAILED = 4; // 发行失败态：开放 refund()/reclaimTokens()/relaunchPresale()
+    /// @notice 达软顶进状态 2 后，超过此时长未 launch()，任何人可 enforceLaunchDeadline 翻失败开放退款
+    ///         （对齐 SmartDeFi LGE "结束后 72 小时未开盘参与者可开始取回资金"）
+    uint256 public constant LAUNCH_DEADLINE = 72 hours;
     address private constant LP_LOCK_ADDRESS = address(0xdead);
 
     /// @notice 创建者购买上限：占开盘池代币份额的 25%（2 亿池 → 5000 万枚）。
@@ -103,12 +117,16 @@ contract PRESALE is Ownable, ReentrancyGuard {
     uint256 public hardcap; // BNB 硬顶（0 = 不限）
     uint256 public minLiquidityAmount; // 加池最低 BNB
     uint256 public startTime; // 认购开始时间（0 = 立即）
+    uint256 public presaleDuration; // 认购时长（秒）：openPresale 时锚定出 endTime
+    uint256 public endTime; // 认购截止 = max(开盘时刻, startTime) + presaleDuration，到期即封认购
     uint256 public slippageProtection; // 滑点保护 bps
     uint256 public softCap; // 认购成功线（BNB wei）：endPresale 达标进待开盘，未达进 FAILED 开放退款
 
     // === 生命周期 ===
-    // 0=创建 1=认购中 2=认购结束 3=已开盘 4=发行失败（未达 softCap 收官，开放退款）
+    // 0=创建 1=认购中 2=认购结束 3=已开盘 4=发行失败（未达 softCap 或 72h 未开盘；4→0 可经 relaunchPresale 重开）
     uint256 public presaleStatus;
+    uint256 public endedAt; // 离开状态 1 的时刻（LAUNCH_DEADLINE 72h 计时起点）
+    uint256 public presaleRound; // 0 = 首轮；relaunchPresale 时 +1（跨轮事件分段索引锚）
 
     // === 认购 ===
     uint256 public accumulatedBNB; // 认购累积 BNB（全部用于加池）
@@ -149,7 +167,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
         uint256 maxBuyPerWallet,
         uint256 hardcap,
         uint256 minLiquidity,
-        uint256 startTime
+        uint256 startTime,
+        uint256 duration
     );
     event VestingConfigSet(uint256 delay, uint256 rate, bool enabled);
     event CoinAndPairSet(address indexed token, address indexed pair);
@@ -165,6 +184,8 @@ contract PRESALE is Ownable, ReentrancyGuard {
     event LiquidityAdded(uint256 tokenAmount, uint256 bnbAmount, uint256 lpTokens, address indexed lpReceiver);
     event SoftCapSet(uint256 softCap);
     event PresaleFailed(uint256 raisedBNB, uint256 softCap);
+    event LaunchDeadlineExceeded(uint256 raisedBNB, uint256 deadline);
+    event PresaleRelaunched(uint256 round);
     event Refunded(address indexed user, uint256 amount);
     event TokensReclaimed(address indexed owner, uint256 amount);
     event CreatorBuyFunded(address indexed funder, uint256 bnbAmount, uint256 tokenTarget);
@@ -233,19 +254,26 @@ contract PRESALE is Ownable, ReentrancyGuard {
         uint256 _maxBuyPerWallet,
         uint256 _hardcap,
         uint256 _minLiquidity,
-        uint256 _startTime
+        uint256 _startTime,
+        uint256 _duration
     ) external onlyOwnerOrConfigurator onlyConfigPhase {
         if (presaleEnabled && _tokenPrice == 0) revert InvalidPrice();
         // 加池下限不可归零：minLiquidityAmount=0 且 softCap=0 时 endPresale 必"达标"进状态 2，
         // 而 launch 加池 0 BNB 恒 revert、状态 2 无退款通道（softCap ≥ minLiquidity 下 0 值即死角）
         if (_minLiquidity == 0) revert ZeroMinLiquidity();
+        // @dev testnet 分支标定：Duration 下限放宽至 1 分钟（测试阶段联调）；
+        //      主网口径须收紧下限并同步前端文档区间（与 vestingDelay 同款处理）
+        if (_duration < 1 minutes || _duration > 30 days) revert InvalidDuration();
         presaleTokenPrice = _tokenPrice;
         maxPresaleTokens = _maxTokens;
         maxBuyPerWallet = _maxBuyPerWallet;
         hardcap = _hardcap;
         minLiquidityAmount = _minLiquidity;
         startTime = _startTime;
-        emit PresaleTermsSet(_tokenPrice, _maxTokens, _maxBuyPerWallet, _hardcap, _minLiquidity, _startTime);
+        presaleDuration = _duration;
+        emit PresaleTermsSet(
+            _tokenPrice, _maxTokens, _maxBuyPerWallet, _hardcap, _minLiquidity, _startTime, _duration
+        );
     }
 
     /// @notice 设置 vesting 释放节奏（vesting 恒开启；Rate 5-20%）
@@ -297,16 +325,29 @@ contract PRESALE is Ownable, ReentrancyGuard {
         if (softCap < minLiquidityAmount) revert SoftCapTooLow();
         // 纵深防御：minLiquidityAmount 归零（双 0 组合绕过 SoftCapTooLow 检查）同样不可开盘
         if (minLiquidityAmount == 0) revert ZeroMinLiquidity();
+        // 锚定认购截止：以 max(当前时刻, startTime) 为起点 + duration——晚开盘不缩水窗口，
+        // 提前开盘（startTime 在未来）时窗口完整落在 [startTime, startTime+duration]
+        uint256 anchor = block.timestamp > startTime ? block.timestamp : startTime;
+        endTime = anchor + presaleDuration;
         presaleStatus = 1;
         emit PresaleOpened();
     }
 
     /// @notice 结束认购并判定结果：达标 → 待开盘(2)；未达 softCap → 发行失败(4)，开放 refund()
-    /// @dev 判定只用内部累计 accumulatedBNB，不用合约余额（receive 直接打款的款项不计入，抗操纵）
-    function endPresale() external onlyOwner {
+    /// @dev 触发权（对齐 SmartDeFi Force end 语义）：owner 任意时刻；其他人仅 endTime 之后。
+    ///      判定只用内部累计 accumulatedBNB，不用合约余额（receive 直接打款的款项不计入，抗操纵）
+    function endPresale() external {
         if (presaleStatus != 1) revert InvalidStatus();
+        if (msg.sender != owner() && block.timestamp < endTime) revert PresaleNotExpired();
+        _settleEnd();
+    }
+
+    /// @notice 结算结束认购（endPresale 与硬顶自动结束共用的判定分支）
+    /// @dev 仅写存储 + 发事件，无外部调用；调用方（endPresale/subscribe）各自的语义保证调用时序安全
+    function _settleEnd() internal {
         if (accumulatedBNB >= softCap) {
             presaleStatus = 2;
+            endedAt = block.timestamp;
             emit PresaleEnded();
         } else {
             presaleStatus = STATUS_FAILED;
@@ -314,12 +355,24 @@ contract PRESALE is Ownable, ReentrancyGuard {
         }
     }
 
-    /// @notice 散户认购：以 BNB 按 presaleTokenPrice 认购代币份额
+    /// @notice 状态 2 超时兜底：达软顶进待开盘后 72 小时（LAUNCH_DEADLINE）仍未 launch，
+    ///         任何人可翻转为 FAILED 开放退款/回收（对齐 SmartDeFi "结束后 72h 未开盘参与者可取回资金"）
+    /// @dev 翻转后开盘通道永久关闭（launch 仅状态 2 可调）；FAILED 为纯退款/回收/重开态，无降额开盘
+    function enforceLaunchDeadline() external {
+        if (presaleStatus != 2) revert InvalidStatus();
+        uint256 deadline = endedAt + LAUNCH_DEADLINE;
+        if (block.timestamp < deadline) revert LaunchDeadlineNotReached();
+        presaleStatus = STATUS_FAILED;
+        emit LaunchDeadlineExceeded(accumulatedBNB, deadline);
+    }
+
+    /// @notice 散户认购：以 BNB 按 presaleTokenPrice 认购代币份额（窗口 [startTime, endTime)）
     function subscribe() external payable nonReentrant {
         if (presaleStatus != 1) revert PresaleNotOpen();
         if (msg.value == 0) revert ZeroValue();
         if (presaleTokenPrice == 0) revert InvalidPrice();
         if (block.timestamp < startTime) revert PresaleNotStarted();
+        if (block.timestamp >= endTime) revert PresaleExpired();
 
         uint256 tokenAmount = (msg.value * 1e18) / presaleTokenPrice;
         if (tokenAmount == 0) revert AmountTooSmall();
@@ -333,6 +386,11 @@ contract PRESALE is Ownable, ReentrancyGuard {
         contributions[msg.sender] += msg.value; // 精确缴款账本（Failed 退款口径，无舍入）
 
         emit Subscribed(msg.sender, tokenAmount, msg.value);
+
+        // 恰达硬顶：本笔成交后同交易内结算结束（对齐 SmartDeFi "hardcap reached → event ends
+        // immediately"）。超额认购已被上方 HardcapReached 拒收，此处只在恰好 == 时触发；
+        // softCap ≤ hardcap 由 setSoftCap 校验，极端配置顺序边界由 _settleEnd 分支自身兜底
+        if (hardcap > 0 && accumulatedBNB == hardcap) _settleEnd();
     }
 
     // ---------------------------------------------------------------------------
@@ -584,19 +642,28 @@ contract PRESALE is Ownable, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------------
-    // 发行失败结算（endPresale 未达 softCap 进入 STATUS_FAILED 后）
+    // 发行失败结算（endPresale 未达 softCap / 72h 超时进入 STATUS_FAILED 后）
     // Failed 态下 subscribe/claim/launch/withdrawRemainingBNB
-    // 均被各自的状态检查天然封锁，唯一出口是退款与代币回收。
+    // 均被各自的状态检查天然封锁，出口为退款、代币回收与重开新一轮。
     // ---------------------------------------------------------------------------
 
-    /// @notice 领回本人全部认购款；按 subscribe 时记录的缴款额精确退款（无任何截留）
-    /// @dev CEI：先清账再转账；权限开放（任何人只能退自己名下的钱）
+    /// @notice 领回本人全部认购款并作废本人代币份额：按 subscribe 时记录的缴款额精确退款（无任何截留）
+    /// @dev CEI：先清账再转账；权限开放（任何人只能退自己名下的钱）。
+    ///      退款即退出本轮：subscribedTokens 同步清零，否则跨轮记账漏洞——
+    ///      第 1 轮认购者退款后于第 2 轮再认购，claim 时按"旧份额+新份额"领币等于用退过的钱领代币。
+    ///      accumulatedBNB 随退款递减，归零 = 全员退款完毕 = relaunchPresale 的重开前置判据。
+    ///      （FAILED 态下视图随退款递减属预期；历史募资额以 PresaleFailed(raisedBNB) 事件为准）
     function refund() external nonReentrant {
         if (presaleStatus != STATUS_FAILED) revert InvalidStatus();
 
         uint256 amount = contributions[msg.sender];
         if (amount == 0) revert NothingToClaim();
+        uint256 tokens = subscribedTokens[msg.sender];
+
         contributions[msg.sender] = 0;
+        subscribedTokens[msg.sender] = 0;
+        accumulatedBNB -= amount;
+        totalSubscribedTokens -= tokens;
 
         TransferHelper.safeTransferETH(msg.sender, amount);
         emit Refunded(msg.sender, amount);
@@ -616,6 +683,25 @@ contract PRESALE is Ownable, ReentrancyGuard {
 
         TransferHelper.safeTransfer(coinAddress, msg.sender, balance);
         emit TokensReclaimed(msg.sender, balance);
+    }
+
+    /// @notice 失败态回到配置期重开新一轮预售（对齐 SmartDeFi "relaunch with new settings"）
+    /// @dev 双出口之二（与 reclaimTokens 互斥：领取后仓空即 EscrowDrained 封死重开）。
+    ///      前置 accumulatedBNB == 0：退款作废份额后该值归零 ⟺ 全员退款完毕——
+    ///      既防"吞款重开"（有人未退就重设条款），也防跨轮账本残留；永不退款者只阻塞重开，
+    ///      不阻塞退款与领取出口。回状态 0 后条款可重设（onlyConfigPhase 复活）或沿用旧条款直接
+    ///      openPresale（重新锚定 endTime）；presaleRound+1 供前端跨轮事件分段去重。
+    ///      状态 4 时 token 恒为 BondingCurve（迁移只发生在出口交易内），重开后 launch 编排不受影响。
+    function relaunchPresale() external onlyOwner {
+        if (presaleStatus != STATUS_FAILED) revert InvalidStatus();
+        if (accumulatedBNB != 0) revert RefundsOutstanding();
+        if (coinAddress == address(0)) revert TokenNotSet();
+        if (IERC20(coinAddress).balanceOf(address(this)) == 0) revert EscrowDrained();
+
+        presaleStatus = 0;
+        presaleRound += 1;
+        endedAt = 0;
+        emit PresaleRelaunched(presaleRound);
     }
 
     // 已知残留边界：经 receive() 直接捐入的非认购 BNB 属捐赠尘埃，无退出通道
